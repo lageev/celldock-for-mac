@@ -7,6 +7,7 @@ struct CellDockSettingsView: View {
     private enum Category: String, CaseIterable {
         case general = "通用"
         case communications = "蜂窝与通信"
+        case webhook = "短信 Webhook"
         case permissions = "通知与权限"
         case updates = "软件更新"
 
@@ -16,6 +17,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return "gearshape"
             case .communications: return "antenna.radiowaves.left.and.right"
+            case .webhook: return "paperplane"
             case .permissions: return "bell.badge"
             case .updates: return "arrow.triangle.2.circlepath"
             }
@@ -25,6 +27,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return L10n.tr("启动、外观与菜单栏行为")
             case .communications: return L10n.tr("查看模块状态并管理通话与短信处理")
+            case .webhook: return L10n.tr("配置 Webhook 地址并查看短信转发状态")
             case .permissions: return L10n.tr("检查 CellDock 的系统访问权限")
             case .updates: return L10n.tr("检查版本并选择更新频道")
             }
@@ -34,6 +37,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return L10n.tr("外观、语言与启动")
             case .communications: return L10n.tr("声音、通话与短信")
+            case .webhook: return L10n.tr("地址、密钥与转发状态")
             case .permissions: return L10n.tr("通知与系统访问权限")
             case .updates: return L10n.tr("版本与更新频道")
             }
@@ -45,6 +49,7 @@ struct CellDockSettingsView: View {
     @ObservedObject private var alertSounds = AlertSoundService.shared
     @ObservedObject private var languageController = AppLanguageController.shared
     @ObservedObject private var updaterManager = UpdaterManager.shared
+    @ObservedObject private var smsWebhook = SMSWebhookService.shared
     @Binding private var sidebarWidth: CGFloat
     private let focusFirstItemRequest: Bool
     private let didHandleFocusFirstItemRequest: () -> Void
@@ -134,7 +139,7 @@ struct CellDockSettingsView: View {
 
                     settingsSidebarGroup(
                         L10n.tr("偏好设置"),
-                        categories: [.general, .communications]
+                        categories: [.general, .communications, .webhook]
                     )
                     settingsSidebarGroup(
                         L10n.tr("系统"),
@@ -289,6 +294,8 @@ struct CellDockSettingsView: View {
             generalSettings
         case .communications:
             communicationSettings
+        case .webhook:
+            webhookSettings
         case .permissions:
             permissionSettings
         case .updates:
@@ -550,6 +557,156 @@ struct CellDockSettingsView: View {
                 .padding(16)
             }
         }
+    }
+
+    private var webhookSettings: some View {
+        VStack(spacing: 16) {
+            settingsSection(title: L10n.tr("Webhook 参数")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    settingRow(
+                        title: L10n.tr("启用短信转发"),
+                        status: smsWebhook.configuration.isEnabled ? L10n.tr("已开启") : nil,
+                        statusColor: .green,
+                        detail: L10n.tr("收到新短信后立即 POST JSON 到指定地址")
+                    ) {
+                        Toggle("启用短信转发", isOn: Binding(
+                            get: { smsWebhook.configuration.isEnabled },
+                            set: { smsWebhook.setEnabled($0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.adaptiveGlass)
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L10n.tr("Webhook 地址"))
+                            .font(.headline)
+                        TextField(
+                            L10n.tr("https://example.com/webhook"),
+                            text: Binding(
+                                get: { smsWebhook.configuration.url },
+                                set: { smsWebhook.setURL($0) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .textContentType(.URL)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L10n.tr("密钥（可选）"))
+                            .font(.headline)
+                        SecureField(
+                            L10n.tr("密钥（可选）"),
+                            text: Binding(
+                                get: { smsWebhook.configuration.secret },
+                                set: { smsWebhook.setSecret($0) }
+                            )
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        Text(L10n.tr("会随请求以 X-CellDock-Secret 请求头发送"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    inlineCallout(
+                        L10n.tr("短信正文会发送到你配置的地址，请只填写受信任的接收端。"),
+                        systemImage: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
+                }
+                .padding(16)
+            }
+
+            settingsSection(title: L10n.tr("转发状态")) {
+                VStack(spacing: 12) {
+                    settingRow(
+                        title: webhookStatusTitle,
+                        status: webhookStatusLabel,
+                        statusColor: webhookStatusColor,
+                        detail: webhookStatusDetail
+                    ) {
+                        if smsWebhook.inFlightCount > 0 {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Button(L10n.tr("发送测试请求")) {
+                                smsWebhook.deliverTest()
+                            }
+                            .adaptiveGlassButton()
+                            .controlSize(.small)
+                            .disabled(smsWebhook.configuration.resolvedURL == nil)
+                        }
+                    }
+
+                    if smsWebhook.configuration.isEnabled,
+                       smsWebhook.configuration.resolvedURL == nil {
+                        inlineCallout(
+                            L10n.tr("请填写有效的 http 或 https 地址。"),
+                            systemImage: "exclamationmark.triangle.fill",
+                            color: .orange
+                        )
+                    }
+                }
+                .padding(16)
+            }
+        }
+    }
+
+    private var webhookStatusTitle: String {
+        if smsWebhook.inFlightCount > 0 {
+            return L10n.tr("正在转发")
+        }
+        if !smsWebhook.configuration.isEnabled {
+            return L10n.tr("已关闭")
+        }
+        if smsWebhook.configuration.resolvedURL == nil {
+            return L10n.tr("未配置")
+        }
+        guard let delivery = smsWebhook.lastDelivery else {
+            return L10n.tr("等待短信")
+        }
+        switch delivery.outcome {
+        case .succeeded: return L10n.tr("转发成功")
+        case .failed: return L10n.tr("转发失败")
+        }
+    }
+
+    private var webhookStatusLabel: String? {
+        guard smsWebhook.inFlightCount == 0,
+              let delivery = smsWebhook.lastDelivery else {
+            return nil
+        }
+        return delivery.date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private var webhookStatusColor: Color {
+        if smsWebhook.inFlightCount > 0 { return .blue }
+        if !smsWebhook.configuration.isEnabled { return .secondary }
+        if smsWebhook.configuration.resolvedURL == nil { return .orange }
+        switch smsWebhook.lastDelivery?.outcome {
+        case .succeeded: return .green
+        case .failed: return .red
+        case nil: return .secondary
+        }
+    }
+
+    private var webhookStatusDetail: String? {
+        guard smsWebhook.inFlightCount == 0,
+              let delivery = smsWebhook.lastDelivery else {
+            return nil
+        }
+        if delivery.outcome == .succeeded, let statusCode = delivery.statusCode {
+            return L10n.tr("上次成功：%@", L10n.tr("HTTP %lld", Int64(statusCode)))
+        }
+        if delivery.outcome == .failed {
+            let reason = delivery.statusCode.map { L10n.tr("HTTP %lld", Int64($0)) }
+                ?? delivery.detail
+                ?? L10n.tr("未知")
+            return L10n.tr("上次失败：%@", reason)
+        }
+        return nil
     }
 
     private func soundSettingRow(_ kind: AlertSoundKind) -> some View {

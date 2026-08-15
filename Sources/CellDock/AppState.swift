@@ -948,6 +948,7 @@ final class AppState: ObservableObject {
             scheduleVerificationAutoDelete()
         }
         guard !isInitialSync else { return }
+        SMSWebhookService.shared.deliver(newMessages)
         for message in newMessages {
             alertSounds.playMessageAlert()
             NotificationService.shared.postNewMessage(

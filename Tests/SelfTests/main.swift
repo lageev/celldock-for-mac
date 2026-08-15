@@ -3422,6 +3422,114 @@ do {
         // Expected.
     }
 
+    try expect(
+        SMSWebhookURLPolicy.resolvedURL(from: " https://hooks.example.com/sms ")?.absoluteString
+            == "https://hooks.example.com/sms" &&
+            SMSWebhookURLPolicy.resolvedURL(from: "http://127.0.0.1:8080/hook") != nil,
+        "valid webhook URLs were rejected"
+    )
+    try expect(
+        SMSWebhookURLPolicy.resolvedURL(from: "") == nil &&
+            SMSWebhookURLPolicy.resolvedURL(from: "ftp://example.com/sms") == nil &&
+            SMSWebhookURLPolicy.resolvedURL(from: "https://") == nil,
+        "invalid webhook URLs were accepted"
+    )
+
+    let webhookNow = Date(timeIntervalSince1970: 1_700_000_000)
+    var inboundWebhookMessage = SMSMessage(
+        id: "webhook-in",
+        moduleID: CellularModuleID(rawValue: "primary"),
+        modemIndices: [],
+        sender: "10086",
+        body: "验证码是 482913，5 分钟内有效。",
+        timestamp: webhookNow,
+        rawPDUs: [],
+        isRead: false,
+        firstSeenAt: webhookNow
+    )
+    var enabledWebhook = SMSWebhookConfiguration(
+        isEnabled: true,
+        url: "https://hooks.example.com/sms",
+        secret: " s3cret "
+    )
+    try expect(
+        SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "enabled webhook skipped an inbound message"
+    )
+    inboundWebhookMessage.direction = .outgoing
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "webhook forwarded an outgoing message"
+    )
+    inboundWebhookMessage.direction = .incoming
+    enabledWebhook.isEnabled = false
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "disabled webhook forwarded an inbound message"
+    )
+    enabledWebhook.isEnabled = true
+    enabledWebhook.url = "not-a-url"
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "invalid webhook URL was treated as ready"
+    )
+
+    inboundWebhookMessage.direction = nil
+    let webhookEnvelope = SMSWebhookEnvelope.received(inboundWebhookMessage)
+    let webhookJSON = SMSWebhookPayloadBuilder.jsonObject(for: webhookEnvelope)
+    try expect(
+        webhookJSON["event"] as? String == "sms.received" &&
+            webhookJSON["id"] as? String == "webhook-in" &&
+            webhookJSON["sender"] as? String == "10086" &&
+            webhookJSON["body"] as? String == "验证码是 482913，5 分钟内有效。" &&
+            webhookJSON["module_id"] as? String == "primary" &&
+            webhookJSON["verification_code"] as? String == "482913" &&
+            webhookJSON["timestamp"] as? String == "2023-11-14T22:13:20Z",
+        "inbound webhook payload fields were incorrect"
+    )
+    let webhookBody = try SMSWebhookPayloadBuilder.jsonData(for: webhookEnvelope)
+    let webhookRequest = SMSWebhookPayloadBuilder.request(
+        url: URL(string: "https://hooks.example.com/sms")!,
+        secret: " s3cret ",
+        body: webhookBody
+    )
+    try expect(
+        webhookRequest.httpMethod == "POST" &&
+            webhookRequest.value(forHTTPHeaderField: "Content-Type") == "application/json" &&
+            webhookRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == "s3cret" &&
+            webhookRequest.httpBody == webhookBody,
+        "webhook request headers or body were incorrect"
+    )
+    let unsignedWebhookRequest = SMSWebhookPayloadBuilder.request(
+        url: URL(string: "https://hooks.example.com/sms")!,
+        secret: "  ",
+        body: webhookBody
+    )
+    try expect(
+        unsignedWebhookRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == nil,
+        "blank webhook secret still produced a secret header"
+    )
+
+    let successDelivery = SMSWebhookDeliveryPolicy.make(statusCode: 204, error: nil, now: webhookNow)
+    try expect(
+        successDelivery.outcome == .succeeded && successDelivery.statusCode == 204,
+        "HTTP 204 was not treated as webhook success"
+    )
+    let failedDelivery = SMSWebhookDeliveryPolicy.make(statusCode: 500, error: nil, now: webhookNow)
+    try expect(
+        failedDelivery.outcome == .failed && failedDelivery.detail == "HTTP 500",
+        "HTTP 500 was not treated as webhook failure"
+    )
+    let networkDelivery = SMSWebhookDeliveryPolicy.make(
+        statusCode: nil,
+        error: URLError(.notConnectedToInternet),
+        now: webhookNow
+    )
+    try expect(
+        networkDelivery.outcome == .failed && networkDelivery.statusCode == nil,
+        "a transport error was not recorded as webhook failure"
+    )
+
     print("CellDock self-tests passed (calls, PDU/UDH, SOCKS5, VoWiFi, buffering, storage, merge).")
 } catch {
     fputs("Self-test failed: \(error)\n", stderr)

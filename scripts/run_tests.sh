@@ -63,6 +63,7 @@ swiftc \
   "$ROOT/Sources/CellDock/VoWiFiRuntimeControl.swift" \
   "$ROOT/Sources/CellDock/VoWiFiUpstreamProxyModels.swift" \
   "$ROOT/Sources/CellDock/VerificationMessageAutoDelete.swift" \
+  "$ROOT/Sources/CellDock/SMSWebhook.swift" \
   "$ROOT/Tests/SelfTests/main.swift" \
   -o "$ROOT/.build/self-tests/CellDockSelfTests"
 
