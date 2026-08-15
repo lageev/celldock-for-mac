@@ -17,7 +17,12 @@ private final class SMSWebhookSessionDelegate: NSObject, URLSessionTaskDelegate 
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
-        completionHandler(nil)
+        completionHandler(
+            SMSWebhookRedirectPolicy.redirectedRequest(
+                from: task.originalRequest,
+                proposed: request
+            )
+        )
     }
 }
 
@@ -67,6 +72,13 @@ final class SMSWebhookService: ObservableObject {
         persist()
     }
 
+    func setPreset(_ preset: SMSWebhookPreset) {
+        guard configuration.preset != preset else { return }
+        configuration.preset = preset
+        configuration.bodyTemplate = preset.defaultBodyTemplate
+        persist()
+    }
+
     func setURL(_ url: String) {
         guard configuration.url != url else { return }
         configuration.url = url
@@ -79,33 +91,81 @@ final class SMSWebhookService: ObservableObject {
         persist()
     }
 
+    func setExtra(_ extra: String) {
+        guard configuration.extra != extra else { return }
+        configuration.extra = extra
+        persist()
+    }
+
+    func setBodyTemplate(_ bodyTemplate: String) {
+        guard configuration.bodyTemplate != bodyTemplate else { return }
+        configuration.bodyTemplate = bodyTemplate
+        persist()
+    }
+
     func deliver(_ messages: [SMSMessage]) {
         let configuration = self.configuration
-        guard let url = configuration.resolvedURL else { return }
         for message in messages where SMSWebhookDeliveryPolicy.shouldDeliver(
             message,
             configuration: configuration
         ) {
-            send(SMSWebhookEnvelope.received(message), url: url, secret: configuration.secret)
+            send(SMSWebhookEnvelope.received(message), configuration: configuration)
         }
     }
 
     func deliverTest() {
-        guard let url = configuration.resolvedURL else { return }
-        send(SMSWebhookEnvelope.test(), url: url, secret: configuration.secret)
+        send(SMSWebhookEnvelope.test(), configuration: configuration)
     }
 
-    private func send(_ envelope: SMSWebhookEnvelope, url: URL, secret: String) {
-        guard let body = try? SMSWebhookPayloadBuilder.jsonData(for: envelope) else {
-            smsWebhookLogger.error("Failed to encode webhook payload")
+    private func send(
+        _ envelope: SMSWebhookEnvelope,
+        configuration: SMSWebhookConfiguration
+    ) {
+        guard let url = configuration.resolvedURL else { return }
+        if configuration.preset.requiresChatID, configuration.trimmedExtra.isEmpty {
+            finish(
+                SMSWebhookDelivery(
+                    outcome: .failed,
+                    date: Date(),
+                    statusCode: nil,
+                    detail: L10n.tr("请填写 Chat ID 或 QQ 号。")
+                )
+            )
             return
         }
-        let request = SMSWebhookPayloadBuilder.request(url: url, secret: secret, body: body)
+        let body: Data
+        do {
+            body = try SMSWebhookPayloadBuilder.bodyData(
+                for: envelope,
+                configuration: configuration
+            )
+        } catch {
+            finish(
+                SMSWebhookDelivery(
+                    outcome: .failed,
+                    date: Date(),
+                    statusCode: nil,
+                    detail: L10n.tr("请求体不是有效 JSON。")
+                )
+            )
+            return
+        }
+        let request = SMSWebhookPayloadBuilder.request(
+            url: url,
+            configuration: configuration,
+            body: body
+        )
         inFlightCount += 1
-        smsWebhookLogger.info("Posting SMS webhook event=\(envelope.event, privacy: .public)")
-        session.dataTask(with: request) { [weak self] _, response, error in
+        smsWebhookLogger.info(
+            "Posting SMS webhook preset=\(configuration.preset.rawValue, privacy: .public) event=\(envelope.event, privacy: .public)"
+        )
+        session.dataTask(with: request) { [weak self] data, response, error in
             let statusCode = (response as? HTTPURLResponse)?.statusCode
-            let delivery = SMSWebhookDeliveryPolicy.make(statusCode: statusCode, error: error)
+            let delivery = SMSWebhookDeliveryPolicy.make(
+                statusCode: statusCode,
+                error: error,
+                responseBody: data
+            )
             Task { @MainActor in
                 self?.finish(delivery)
             }

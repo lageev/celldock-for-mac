@@ -37,7 +37,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return L10n.tr("外观、语言与启动")
             case .communications: return L10n.tr("声音、通话与短信")
-            case .webhook: return L10n.tr("地址、密钥与转发状态")
+            case .webhook: return L10n.tr("预设、请求体与转发状态")
             case .permissions: return L10n.tr("通知与系统访问权限")
             case .updates: return L10n.tr("版本与更新频道")
             }
@@ -579,11 +579,28 @@ struct CellDockSettingsView: View {
 
                     Divider()
 
+                    settingRow(
+                        title: L10n.tr("Webhook 类型"),
+                        detail: L10n.tr("选择机器人类型后会填入对应请求体，可再自行修改。")
+                    ) {
+                        Picker(L10n.tr("Webhook 类型"), selection: Binding(
+                            get: { smsWebhook.configuration.preset },
+                            set: { smsWebhook.setPreset($0) }
+                        )) {
+                            ForEach(SMSWebhookPreset.allCases) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 220)
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text(L10n.tr("Webhook 地址"))
                             .font(.headline)
                         TextField(
-                            L10n.tr("https://example.com/webhook"),
+                            smsWebhook.configuration.preset.urlPlaceholder,
                             text: Binding(
                                 get: { smsWebhook.configuration.url },
                                 set: { smsWebhook.setURL($0) }
@@ -593,18 +610,58 @@ struct CellDockSettingsView: View {
                         .textContentType(.URL)
                     }
 
+                    if let extraTitle = smsWebhook.configuration.preset.extraFieldTitle {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(extraTitle)
+                                .font(.headline)
+                            TextField(
+                                extraTitle,
+                                text: Binding(
+                                    get: { smsWebhook.configuration.extra },
+                                    set: { smsWebhook.setExtra($0) }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    if smsWebhook.configuration.preset.usesSecret {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(smsWebhook.configuration.preset.secretTitle)
+                                .font(.headline)
+                            SecureField(
+                                smsWebhook.configuration.preset.secretTitle,
+                                text: Binding(
+                                    get: { smsWebhook.configuration.secret },
+                                    set: { smsWebhook.setSecret($0) }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            Text(smsWebhook.configuration.preset.secretCaption)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(L10n.tr("密钥（可选）"))
+                        Text(L10n.tr("请求体"))
                             .font(.headline)
-                        SecureField(
-                            L10n.tr("密钥（可选）"),
+                        TextEditor(
                             text: Binding(
-                                get: { smsWebhook.configuration.secret },
-                                set: { smsWebhook.setSecret($0) }
+                                get: { smsWebhook.configuration.effectiveBodyTemplate },
+                                set: { smsWebhook.setBodyTemplate($0) }
                             )
                         )
-                        .textFieldStyle(.roundedBorder)
-                        Text(L10n.tr("会随请求以 X-CellDock-Secret 请求头发送"))
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(minHeight: 132, maxHeight: 220)
+                        .scrollContentBackground(.hidden)
+                        .padding(8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.primary.opacity(0.05))
+                        )
+                        Text(L10n.tr("可用变量：{{sender}}、{{body}}、{{text}}、{{id}}、{{timestamp}}、{{module_id}}、{{verification_code}}、{{chat_id}}"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -636,7 +693,7 @@ struct CellDockSettingsView: View {
                             }
                             .adaptiveGlassButton()
                             .controlSize(.small)
-                            .disabled(smsWebhook.configuration.resolvedURL == nil)
+                            .disabled(!smsWebhook.configuration.hasSendableDestination)
                         }
                     }
 
@@ -644,6 +701,14 @@ struct CellDockSettingsView: View {
                        smsWebhook.configuration.resolvedURL == nil {
                         inlineCallout(
                             L10n.tr("请填写有效的 http 或 https 地址。"),
+                            systemImage: "exclamationmark.triangle.fill",
+                            color: .orange
+                        )
+                    } else if smsWebhook.configuration.isEnabled,
+                              smsWebhook.configuration.preset.requiresChatID,
+                              smsWebhook.configuration.trimmedExtra.isEmpty {
+                        inlineCallout(
+                            L10n.tr("请填写 Chat ID 或 QQ 号。"),
                             systemImage: "exclamationmark.triangle.fill",
                             color: .orange
                         )
@@ -701,10 +766,22 @@ struct CellDockSettingsView: View {
             return L10n.tr("上次成功：%@", L10n.tr("HTTP %lld", Int64(statusCode)))
         }
         if delivery.outcome == .failed {
-            let reason = delivery.statusCode.map { L10n.tr("HTTP %lld", Int64($0)) }
-                ?? delivery.detail
-                ?? L10n.tr("未知")
-            return L10n.tr("上次失败：%@", reason)
+            if let detail = delivery.detail, !detail.isEmpty {
+                if let statusCode = delivery.statusCode, (200..<300).contains(statusCode) {
+                    return L10n.tr("上次失败：%@", detail)
+                }
+                if let statusCode = delivery.statusCode {
+                    return L10n.tr(
+                        "上次失败：%@",
+                        "\(L10n.tr("HTTP %lld", Int64(statusCode))) · \(detail)"
+                    )
+                }
+                return L10n.tr("上次失败：%@", detail)
+            }
+            return L10n.tr(
+                "上次失败：%@",
+                delivery.statusCode.map { L10n.tr("HTTP %lld", Int64($0)) } ?? L10n.tr("未知")
+            )
         }
         return nil
     }

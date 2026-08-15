@@ -3473,41 +3473,130 @@ do {
         !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
         "invalid webhook URL was treated as ready"
     )
+    enabledWebhook.url = "https://api.telegram.org/bot123:abc/sendMessage"
+    enabledWebhook.preset = .telegram
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "telegram webhook without chat id was treated as ready"
+    )
+    enabledWebhook.extra = "-100123"
+    try expect(
+        SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "telegram webhook with chat id was skipped"
+    )
 
     inboundWebhookMessage.direction = nil
     let webhookEnvelope = SMSWebhookEnvelope.received(inboundWebhookMessage)
-    let webhookJSON = SMSWebhookPayloadBuilder.jsonObject(for: webhookEnvelope)
+    let customWebhook = SMSWebhookConfiguration(
+        isEnabled: true,
+        url: "https://hooks.example.com/sms",
+        secret: " s3cret "
+    )
+    let customBody = try SMSWebhookPayloadBuilder.bodyData(
+        for: webhookEnvelope,
+        configuration: customWebhook
+    )
+    let customJSON = try JSONSerialization.jsonObject(with: customBody) as? [String: Any]
     try expect(
-        webhookJSON["event"] as? String == "sms.received" &&
-            webhookJSON["id"] as? String == "webhook-in" &&
-            webhookJSON["sender"] as? String == "10086" &&
-            webhookJSON["body"] as? String == "验证码是 482913，5 分钟内有效。" &&
-            webhookJSON["module_id"] as? String == "primary" &&
-            webhookJSON["verification_code"] as? String == "482913" &&
-            webhookJSON["timestamp"] as? String == "2023-11-14T22:13:20Z",
+        customJSON?["event"] as? String == "sms.received" &&
+            customJSON?["id"] as? String == "webhook-in" &&
+            customJSON?["sender"] as? String == "10086" &&
+            customJSON?["body"] as? String == "验证码是 482913，5 分钟内有效。" &&
+            customJSON?["module_id"] as? String == "primary" &&
+            customJSON?["verification_code"] as? String == "482913" &&
+            customJSON?["timestamp"] as? String == "2023-11-14T22:13:20Z",
         "inbound webhook payload fields were incorrect"
     )
-    let webhookBody = try SMSWebhookPayloadBuilder.jsonData(for: webhookEnvelope)
-    let webhookRequest = SMSWebhookPayloadBuilder.request(
+    let customRequest = SMSWebhookPayloadBuilder.request(
         url: URL(string: "https://hooks.example.com/sms")!,
-        secret: " s3cret ",
-        body: webhookBody
+        configuration: customWebhook,
+        body: customBody
     )
     try expect(
-        webhookRequest.httpMethod == "POST" &&
-            webhookRequest.value(forHTTPHeaderField: "Content-Type") == "application/json" &&
-            webhookRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == "s3cret" &&
-            webhookRequest.httpBody == webhookBody,
+        customRequest.httpMethod == "POST" &&
+            customRequest.value(forHTTPHeaderField: "Content-Type") == "application/json" &&
+            customRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == "s3cret" &&
+            customRequest.httpBody == customBody,
         "webhook request headers or body were incorrect"
     )
+    var unsignedWebhook = customWebhook
+    unsignedWebhook.secret = "  "
     let unsignedWebhookRequest = SMSWebhookPayloadBuilder.request(
         url: URL(string: "https://hooks.example.com/sms")!,
-        secret: "  ",
-        body: webhookBody
+        configuration: unsignedWebhook,
+        body: customBody
     )
     try expect(
         unsignedWebhookRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == nil,
         "blank webhook secret still produced a secret header"
+    )
+
+    let quotedMessage = SMSMessage(
+        id: "webhook-quoted",
+        moduleID: CellularModuleID(rawValue: "primary"),
+        modemIndices: [],
+        sender: "10086",
+        body: "验证码是 \"482913\"",
+        timestamp: webhookNow,
+        rawPDUs: [],
+        isRead: false,
+        firstSeenAt: webhookNow
+    )
+    let feishuWebhook = SMSWebhookConfiguration(
+        isEnabled: true,
+        preset: .feishu,
+        url: "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+    )
+    let feishuBody = try SMSWebhookPayloadBuilder.bodyData(
+        for: SMSWebhookEnvelope.received(quotedMessage),
+        configuration: feishuWebhook
+    )
+    let feishuJSON = try JSONSerialization.jsonObject(with: feishuBody) as? [String: Any]
+    let feishuContent = feishuJSON?["content"] as? [String: Any]
+    try expect(
+        feishuJSON?["msg_type"] as? String == "text" &&
+            feishuContent?["text"] as? String == "来自 10086\n验证码是 \"482913\"",
+        "feishu webhook body was not rendered as a text message"
+    )
+
+    let qqWebhook = SMSWebhookConfiguration(
+        isEnabled: true,
+        preset: .qqPrivate,
+        url: "http://127.0.0.1:5700/send_private_msg",
+        secret: "qq-token",
+        extra: "10001"
+    )
+    let qqBody = try SMSWebhookPayloadBuilder.bodyData(
+        for: webhookEnvelope,
+        configuration: qqWebhook
+    )
+    let qqJSON = try JSONSerialization.jsonObject(with: qqBody) as? [String: Any]
+    let qqRequest = SMSWebhookPayloadBuilder.request(
+        url: URL(string: "http://127.0.0.1:5700/send_private_msg")!,
+        configuration: qqWebhook,
+        body: qqBody
+    )
+    try expect(
+        qqJSON?["user_id"] as? Int == 10_001 &&
+            qqRequest.value(forHTTPHeaderField: "Authorization") == "Bearer qq-token",
+        "qq bot webhook did not use OneBot user_id and bearer token"
+    )
+
+    var originalPOST = URLRequest(url: URL(string: "https://hooks.example.com/sms")!)
+    originalPOST.httpMethod = "POST"
+    originalPOST.httpBody = Data("{\"text\":\"hi\"}".utf8)
+    originalPOST.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    var proposedGET = URLRequest(url: URL(string: "https://hooks.example.com/sms/")!)
+    proposedGET.httpMethod = "GET"
+    let redirected = SMSWebhookRedirectPolicy.redirectedRequest(
+        from: originalPOST,
+        proposed: proposedGET
+    )
+    try expect(
+        redirected.httpMethod == "POST" &&
+            redirected.httpBody == originalPOST.httpBody &&
+            redirected.value(forHTTPHeaderField: "Content-Type") == "application/json",
+        "webhook redirect dropped the original POST body"
     )
 
     let successDelivery = SMSWebhookDeliveryPolicy.make(statusCode: 204, error: nil, now: webhookNow)
@@ -3528,6 +3617,42 @@ do {
     try expect(
         networkDelivery.outcome == .failed && networkDelivery.statusCode == nil,
         "a transport error was not recorded as webhook failure"
+    )
+    let feishuErrorBody = Data("{\"code\":19022,\"msg\":\"params error\"}".utf8)
+    let feishuErrorDelivery = SMSWebhookDeliveryPolicy.make(
+        statusCode: 200,
+        error: nil,
+        responseBody: feishuErrorBody,
+        now: webhookNow
+    )
+    try expect(
+        feishuErrorDelivery.outcome == .failed && feishuErrorDelivery.detail == "params error",
+        "HTTP 200 with a Feishu params error was treated as success"
+    )
+    let dingtalkOKBody = Data("{\"errcode\":0,\"errmsg\":\"ok\"}".utf8)
+    let dingtalkOKDelivery = SMSWebhookDeliveryPolicy.make(
+        statusCode: 200,
+        error: nil,
+        responseBody: dingtalkOKBody,
+        now: webhookNow
+    )
+    try expect(
+        dingtalkOKDelivery.outcome == .succeeded,
+        "HTTP 200 with DingTalk errcode 0 was treated as failure"
+    )
+    let telegramErrorBody = Data(
+        "{\"ok\":false,\"error_code\":400,\"description\":\"Bad Request: chat not found\"}".utf8
+    )
+    let telegramErrorDelivery = SMSWebhookDeliveryPolicy.make(
+        statusCode: 200,
+        error: nil,
+        responseBody: telegramErrorBody,
+        now: webhookNow
+    )
+    try expect(
+        telegramErrorDelivery.outcome == .failed &&
+            telegramErrorDelivery.detail == "Bad Request: chat not found",
+        "HTTP 200 with Telegram ok=false was treated as success"
     )
 
     print("CellDock self-tests passed (calls, PDU/UDH, SOCKS5, VoWiFi, buffering, storage, merge).")
