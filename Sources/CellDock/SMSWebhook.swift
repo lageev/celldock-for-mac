@@ -91,6 +91,7 @@ enum SMSWebhookPreset: String, Codable, CaseIterable, Identifiable {
               "id": "{{id}}",
               "sender": "{{sender}}",
               "body": "{{body}}",
+              "text": "{{text}}",
               "timestamp": "{{timestamp}}",
               "received_at": "{{received_at}}",
               "module_id": "{{module_id}}",
@@ -140,15 +141,75 @@ enum SMSWebhookPreset: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum SMSWebhookEventKind: String, Codable, CaseIterable, Identifiable {
+    case smsReceived = "sms.received"
+    case callMissed = "call.missed"
+    case callIncoming = "call.incoming"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .smsReceived: return L10n.tr("新短信")
+        case .callMissed: return L10n.tr("未接来电")
+        case .callIncoming: return L10n.tr("来电")
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .smsReceived: return L10n.tr("收到新短信后转发")
+        case .callMissed: return L10n.tr("未接来电时转发")
+        case .callIncoming: return L10n.tr("来电时转发到此渠道。IM 延迟较高，可能来不及接听。")
+        }
+    }
+}
+
+struct SMSWebhookHeader: Codable, Equatable, Identifiable {
+    var id: UUID
+    var name: String
+    var value: String
+
+    init(id: UUID = UUID(), name: String = "", value: String = "") {
+        self.id = id
+        self.name = name
+        self.value = value
+    }
+}
+
 struct SMSWebhookConfiguration: Codable, Equatable {
     var isEnabled: Bool
     var preset: SMSWebhookPreset
-    var url: String
-    var secret: String
-    var extra: String
-    var bodyTemplate: String
+    var selectedPresets: Set<SMSWebhookPreset>
+    var customHeaders: [SMSWebhookHeader]
+    var urls: [SMSWebhookPreset: String]
+    var extras: [SMSWebhookPreset: String]
+    var secrets: [SMSWebhookPreset: String]
+    var bodyTemplates: [SMSWebhookPreset: String]
+    var forwardedEvents: Set<SMSWebhookEventKind>
+
+    var url: String {
+        get { urls[preset] ?? "" }
+        set { urls[preset] = newValue }
+    }
+
+    var extra: String {
+        get { extras[preset] ?? "" }
+        set { extras[preset] = newValue }
+    }
+
+    var secret: String {
+        get { secrets[preset] ?? "" }
+        set { secrets[preset] = newValue }
+    }
+
+    var bodyTemplate: String {
+        get { bodyTemplates[preset] ?? "" }
+        set { bodyTemplates[preset] = newValue }
+    }
 
     static let empty = SMSWebhookConfiguration()
+    static let defaultForwardedEvents: Set<SMSWebhookEventKind> = [.smsReceived]
 
     init(
         isEnabled: Bool = false,
@@ -156,24 +217,99 @@ struct SMSWebhookConfiguration: Codable, Equatable {
         url: String = "",
         secret: String = "",
         extra: String = "",
-        bodyTemplate: String = ""
+        bodyTemplate: String = "",
+        customHeaders: [SMSWebhookHeader] = [],
+        urls: [SMSWebhookPreset: String] = [:],
+        extras: [SMSWebhookPreset: String] = [:],
+        secrets: [SMSWebhookPreset: String] = [:],
+        bodyTemplates: [SMSWebhookPreset: String] = [:],
+        selectedPresets: Set<SMSWebhookPreset>? = nil,
+        forwardedEvents: Set<SMSWebhookEventKind> = [.smsReceived]
     ) {
         self.isEnabled = isEnabled
         self.preset = preset
-        self.url = url
-        self.secret = secret
-        self.extra = extra
-        self.bodyTemplate = bodyTemplate
+        self.selectedPresets = selectedPresets ?? [preset]
+        self.customHeaders = customHeaders
+        self.urls = urls
+        self.extras = extras
+        self.secrets = secrets
+        self.bodyTemplates = bodyTemplates
+        self.forwardedEvents = forwardedEvents
+        if !url.isEmpty {
+            self.urls[preset] = url
+        }
+        if !secret.isEmpty {
+            self.secrets[preset] = secret
+        }
+        if !extra.isEmpty {
+            self.extras[preset] = extra
+        }
+        if !bodyTemplate.isEmpty {
+            self.bodyTemplates[preset] = bodyTemplate
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case isEnabled, preset, selectedPresets, url, secret, extra, bodyTemplate
+        case customHeaders, urls, extras, secrets, bodyTemplates, forwardedEvents
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         isEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false
         preset = try container.decodeIfPresent(SMSWebhookPreset.self, forKey: .preset) ?? .custom
-        url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
-        secret = try container.decodeIfPresent(String.self, forKey: .secret) ?? ""
-        extra = try container.decodeIfPresent(String.self, forKey: .extra) ?? ""
-        bodyTemplate = try container.decodeIfPresent(String.self, forKey: .bodyTemplate) ?? ""
+        selectedPresets = try container.decodeIfPresent(
+            Set<SMSWebhookPreset>.self,
+            forKey: .selectedPresets
+        ) ?? [preset]
+        customHeaders = try container.decodeIfPresent(
+            [SMSWebhookHeader].self,
+            forKey: .customHeaders
+        ) ?? []
+        urls = try container.decodeIfPresent([SMSWebhookPreset: String].self, forKey: .urls) ?? [:]
+        extras = try container.decodeIfPresent([SMSWebhookPreset: String].self, forKey: .extras) ?? [:]
+        secrets = try container.decodeIfPresent([SMSWebhookPreset: String].self, forKey: .secrets) ?? [:]
+        bodyTemplates = try container.decodeIfPresent(
+            [SMSWebhookPreset: String].self,
+            forKey: .bodyTemplates
+        ) ?? [:]
+        let legacyURL = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
+        if (urls[preset] ?? "").isEmpty, !legacyURL.isEmpty {
+            urls[preset] = legacyURL
+        }
+        let legacySecret = try container.decodeIfPresent(String.self, forKey: .secret) ?? ""
+        if (secrets[preset] ?? "").isEmpty, !legacySecret.isEmpty {
+            secrets[preset] = legacySecret
+        }
+        let legacyExtra = try container.decodeIfPresent(String.self, forKey: .extra) ?? ""
+        if (extras[preset] ?? "").isEmpty, !legacyExtra.isEmpty {
+            extras[preset] = legacyExtra
+        }
+        let legacyBody = try container.decodeIfPresent(String.self, forKey: .bodyTemplate) ?? ""
+        if (bodyTemplates[preset] ?? "").isEmpty, !legacyBody.isEmpty {
+            bodyTemplates[preset] = legacyBody
+        }
+        forwardedEvents = try container.decodeIfPresent(
+            Set<SMSWebhookEventKind>.self,
+            forKey: .forwardedEvents
+        ) ?? Self.defaultForwardedEvents
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(preset, forKey: .preset)
+        try container.encode(selectedPresets, forKey: .selectedPresets)
+        try container.encode(url, forKey: .url)
+        try container.encode(secret, forKey: .secret)
+        try container.encode(extra, forKey: .extra)
+        try container.encode(bodyTemplate, forKey: .bodyTemplate)
+        try container.encode(customHeaders, forKey: .customHeaders)
+        try container.encode(urls, forKey: .urls)
+        try container.encode(extras, forKey: .extras)
+        try container.encode(secrets, forKey: .secrets)
+        try container.encode(bodyTemplates, forKey: .bodyTemplates)
+        try container.encode(forwardedEvents, forKey: .forwardedEvents)
     }
 
     var effectiveBodyTemplate: String {
@@ -190,11 +326,27 @@ struct SMSWebhookConfiguration: Codable, Equatable {
     }
 
     var hasSendableDestination: Bool {
-        resolvedURL != nil && (!preset.requiresChatID || !trimmedExtra.isEmpty)
+        hasSendableDestination(for: preset)
+    }
+
+    var sendablePresets: [SMSWebhookPreset] {
+        SMSWebhookPreset.allCases.filter {
+            selectedPresets.contains($0) && hasSendableDestination(for: $0)
+        }
     }
 
     var canForward: Bool {
-        isEnabled && hasSendableDestination
+        isEnabled && !sendablePresets.isEmpty
+    }
+
+    func hasSendableDestination(for preset: SMSWebhookPreset) -> Bool {
+        SMSWebhookURLPolicy.resolvedURL(from: urls[preset] ?? "") != nil
+            && (!preset.requiresChatID
+                || !(extras[preset] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    func forwards(_ kind: SMSWebhookEventKind) -> Bool {
+        forwardedEvents.contains(kind)
     }
 }
 
@@ -233,12 +385,43 @@ struct SMSWebhookEnvelope: Equatable {
         )
     }
 
+    static func incomingCall(
+        number: String?,
+        displayName: String?,
+        moduleID: CellularModuleID?,
+        now: Date = Date()
+    ) -> Self {
+        SMSWebhookEnvelope(
+            event: SMSWebhookEventKind.callIncoming.rawValue,
+            id: "call-incoming-\(moduleID?.rawValue ?? "unknown")",
+            sender: displayName ?? number ?? L10n.tr("未知号码"),
+            body: L10n.tr("蜂窝来电"),
+            timestamp: now,
+            receivedAt: now,
+            moduleID: moduleID?.rawValue,
+            verificationCode: nil
+        )
+    }
+
+    static func missedCall(_ record: CallHistoryRecord, displayName: String?) -> Self {
+        SMSWebhookEnvelope(
+            event: SMSWebhookEventKind.callMissed.rawValue,
+            id: record.id.uuidString,
+            sender: displayName ?? record.number,
+            body: L10n.tr("未接来电"),
+            timestamp: record.endedAt,
+            receivedAt: record.endedAt,
+            moduleID: record.moduleID?.rawValue,
+            verificationCode: nil
+        )
+    }
+
     static func test(now: Date = Date()) -> Self {
         SMSWebhookEnvelope(
-            event: "sms.test",
+            event: "notification.test",
             id: "celldock-webhook-test",
             sender: "CellDock",
-            body: "这是一条 CellDock Webhook 测试消息。",
+            body: L10n.tr("这是一条 CellDock 通知转发测试消息。"),
             timestamp: now,
             receivedAt: now,
             moduleID: nil,
@@ -266,13 +449,31 @@ enum SMSWebhookRedirectPolicy {
         guard let original else { return request }
         request.httpMethod = original.httpMethod
         request.httpBody = original.httpBody
-        if request.value(forHTTPHeaderField: "Content-Type") == nil {
-            request.setValue(
-                original.value(forHTTPHeaderField: "Content-Type"),
-                forHTTPHeaderField: "Content-Type"
-            )
+        if let fields = original.allHTTPHeaderFields {
+            for (name, value) in fields where request.value(forHTTPHeaderField: name) == nil {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
         }
         return request
+    }
+}
+
+enum SMSWebhookHeaderPolicy {
+    static func resolved(_ headers: [SMSWebhookHeader]) -> [(name: String, value: String)] {
+        headers.compactMap { header in
+            let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard isValidName(name) else { return nil }
+            return (
+                name,
+                header.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+    }
+
+    static func isValidName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "!#$%&'*+-.^_`|~"))
+        return name.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 }
 
@@ -285,7 +486,14 @@ enum SMSWebhookDeliveryPolicy {
         _ message: SMSMessage,
         configuration: SMSWebhookConfiguration
     ) -> Bool {
-        configuration.canForward && !message.isOutgoing
+        shouldDeliver(.smsReceived, configuration: configuration) && !message.isOutgoing
+    }
+
+    static func shouldDeliver(
+        _ kind: SMSWebhookEventKind,
+        configuration: SMSWebhookConfiguration
+    ) -> Bool {
+        configuration.canForward && configuration.forwards(kind)
     }
 
     static func make(
@@ -375,11 +583,38 @@ enum SMSWebhookDeliveryPolicy {
 }
 
 enum SMSWebhookPayloadBuilder {
+    static var placeholderHelpItems: [(key: String, detail: String)] {
+        [
+            ("event", L10n.tr("sms.received、call.incoming、call.missed；测试为 notification.test")),
+            ("id", L10n.tr("记录 ID")),
+            ("sender", L10n.tr("发件人或来电方")),
+            ("body", L10n.tr("原文；来电时为事件名称")),
+            ("text", L10n.tr("带发件人的完整文本")),
+            ("timestamp", L10n.tr("事件时间（北京时间）")),
+            ("received_at", L10n.tr("本机收到时间（北京时间）")),
+            ("module_id", L10n.tr("模组 ID")),
+            ("verification_code", L10n.tr("验证码，没有则为空")),
+            ("chat_id", L10n.tr("Chat ID 或 QQ 号/群号"))
+        ]
+    }
+
+    static var placeholderKeys: [String] {
+        placeholderHelpItems.map(\.key)
+    }
+
     static func templateValues(
         for envelope: SMSWebhookEnvelope,
         configuration: SMSWebhookConfiguration
     ) -> [String: String] {
-        var text = "来自 \(envelope.sender)\n\(envelope.body)"
+        var text: String
+        switch envelope.event {
+        case SMSWebhookEventKind.callIncoming.rawValue:
+            text = "\(L10n.tr("蜂窝来电"))\n来自 \(envelope.sender)"
+        case SMSWebhookEventKind.callMissed.rawValue:
+            text = "\(L10n.tr("未接来电"))\n来自 \(envelope.sender)"
+        default:
+            text = "来自 \(envelope.sender)\n\(envelope.body)"
+        }
         if configuration.preset == .dingtalk, !configuration.trimmedExtra.isEmpty {
             text = "\(configuration.trimmedExtra)\n\(text)"
         }
@@ -452,6 +687,11 @@ enum SMSWebhookPayloadBuilder {
         request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("CellDock", forHTTPHeaderField: "User-Agent")
+        if configuration.preset == .custom {
+            for header in SMSWebhookHeaderPolicy.resolved(configuration.customHeaders) {
+                request.setValue(header.value, forHTTPHeaderField: header.name)
+            }
+        }
         let secret = configuration.secret.trimmingCharacters(in: .whitespacesAndNewlines)
         if !secret.isEmpty {
             switch configuration.preset {
@@ -470,6 +710,8 @@ enum SMSWebhookPayloadBuilder {
     private static let iso8601: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+            ?? TimeZone(secondsFromGMT: 8 * 3600)
         return formatter
     }()
 }

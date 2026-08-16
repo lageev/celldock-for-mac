@@ -325,7 +325,7 @@ private struct ProxyEditorView: View {
     private var actionBar: some View {
         HStack(spacing: 12) {
             Toggle(L10n.tr("已启用"), isOn: $draft.isEnabled)
-                .toggleStyle(.adaptiveGlass)
+                .toggleStyle(.adaptiveGlassLabeled)
                 .controlSize(.small)
                 .frame(maxWidth: 170)
             Spacer(minLength: 20)

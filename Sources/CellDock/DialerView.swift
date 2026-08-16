@@ -233,8 +233,7 @@ struct DialerView: View {
     }
 
     private var canDial: Bool {
-        appState.call.canDial &&
-            !appState.isChangingCall &&
+        !appState.isChangingCall &&
             CallATParser.normalizedDialNumber(model.dialNumber) != nil
     }
 
@@ -394,8 +393,7 @@ private struct DialerActionButtonStyle: ButtonStyle {
             .adaptiveGlassSurface(
                 cornerRadius: height / 2,
                 treatment: isProminent ? .regular : .clear,
-                tint: surfaceTint,
-                isInteractive: isEnabled
+                tint: surfaceTint
             )
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .brightness(configuration.isPressed ? -0.04 : 0)
@@ -429,8 +427,7 @@ private struct DialerCircleButtonStyle: ButtonStyle {
             .adaptiveGlassSurface(
                 cornerRadius: size / 2,
                 treatment: isProminent ? .regular : .clear,
-                tint: surfaceTint,
-                isInteractive: isEnabled
+                tint: surfaceTint
             )
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
             .brightness(configuration.isPressed ? -0.04 : 0)

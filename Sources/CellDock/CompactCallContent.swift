@@ -183,10 +183,7 @@ struct CompactCallContent: View {
             }
             .adaptiveGlassButton(.prominent)
             .tint(.green)
-            .disabled(
-                !appState.call.voiceOverUSBSupported ||
-                    appState.isChangingCall
-            )
+            .disabled(appState.isChangingCall)
         }
     }
 
@@ -395,9 +392,7 @@ struct CompactCallContent: View {
     }
 
     private var canDial: Bool {
-        appState.currentCommunicationModemSnapshot.simReady &&
-            appState.call.canDial &&
-            CallATParser.normalizedDialNumber(dialNumber) != nil &&
+        CallATParser.normalizedDialNumber(dialNumber) != nil &&
             !appState.isChangingCall
     }
 
@@ -664,11 +659,11 @@ private struct CompactCallControlButton: View {
             if isSelected || tint == .red {
                 icon
                     .foregroundStyle(Color.white)
-                    .glassEffect(.regular.tint(tint).interactive(), in: Circle())
+                    .glassEffect(.regular.tint(tint), in: Circle())
             } else {
                 icon
                     .foregroundStyle(tint)
-                    .glassEffect(.clear.tint(tint.opacity(0.10)).interactive(), in: Circle())
+                    .glassEffect(.clear.tint(tint.opacity(0.10)), in: Circle())
             }
         } else {
             icon

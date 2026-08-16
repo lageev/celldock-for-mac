@@ -73,9 +73,22 @@ final class SMSWebhookService: ObservableObject {
     }
 
     func setPreset(_ preset: SMSWebhookPreset) {
-        guard configuration.preset != preset else { return }
-        configuration.preset = preset
-        configuration.bodyTemplate = preset.defaultBodyTemplate
+        var selected = configuration.selectedPresets
+        if selected.contains(preset) {
+            if configuration.preset == preset {
+                selected.remove(preset)
+                configuration.selectedPresets = selected
+                if let next = SMSWebhookPreset.allCases.first(where: { selected.contains($0) }) {
+                    configuration.preset = next
+                }
+            } else {
+                configuration.preset = preset
+            }
+        } else {
+            selected.insert(preset)
+            configuration.selectedPresets = selected
+            configuration.preset = preset
+        }
         persist()
     }
 
@@ -103,6 +116,24 @@ final class SMSWebhookService: ObservableObject {
         persist()
     }
 
+    func setCustomHeaders(_ headers: [SMSWebhookHeader]) {
+        guard configuration.customHeaders != headers else { return }
+        configuration.customHeaders = headers
+        persist()
+    }
+
+    func setEvent(_ kind: SMSWebhookEventKind, enabled: Bool) {
+        var events = configuration.forwardedEvents
+        if enabled {
+            events.insert(kind)
+        } else {
+            events.remove(kind)
+        }
+        guard configuration.forwardedEvents != events else { return }
+        configuration.forwardedEvents = events
+        persist()
+    }
+
     func deliver(_ messages: [SMSMessage]) {
         let configuration = self.configuration
         for message in messages where SMSWebhookDeliveryPolicy.shouldDeliver(
@@ -113,11 +144,51 @@ final class SMSWebhookService: ObservableObject {
         }
     }
 
+    func deliverIncomingCall(
+        number: String?,
+        displayName: String?,
+        moduleID: CellularModuleID?
+    ) {
+        let configuration = self.configuration
+        guard SMSWebhookDeliveryPolicy.shouldDeliver(.callIncoming, configuration: configuration) else {
+            return
+        }
+        send(
+            SMSWebhookEnvelope.incomingCall(
+                number: number,
+                displayName: displayName,
+                moduleID: moduleID
+            ),
+            configuration: configuration
+        )
+    }
+
+    func deliverMissedCall(_ record: CallHistoryRecord, displayName: String?) {
+        let configuration = self.configuration
+        guard SMSWebhookDeliveryPolicy.shouldDeliver(.callMissed, configuration: configuration) else {
+            return
+        }
+        send(SMSWebhookEnvelope.missedCall(record, displayName: displayName), configuration: configuration)
+    }
+
     func deliverTest() {
         send(SMSWebhookEnvelope.test(), configuration: configuration)
     }
 
     private func send(
+        _ envelope: SMSWebhookEnvelope,
+        configuration: SMSWebhookConfiguration
+    ) {
+        let presets = configuration.sendablePresets
+        guard !presets.isEmpty else { return }
+        for preset in presets {
+            var snapshot = configuration
+            snapshot.preset = preset
+            post(envelope, configuration: snapshot)
+        }
+    }
+
+    private func post(
         _ envelope: SMSWebhookEnvelope,
         configuration: SMSWebhookConfiguration
     ) {
@@ -157,7 +228,7 @@ final class SMSWebhookService: ObservableObject {
         )
         inFlightCount += 1
         smsWebhookLogger.info(
-            "Posting SMS webhook preset=\(configuration.preset.rawValue, privacy: .public) event=\(envelope.event, privacy: .public)"
+            "Posting webhook preset=\(configuration.preset.rawValue, privacy: .public) event=\(envelope.event, privacy: .public)"
         )
         session.dataTask(with: request) { [weak self] data, response, error in
             let statusCode = (response as? HTTPURLResponse)?.statusCode
@@ -179,11 +250,11 @@ final class SMSWebhookService: ObservableObject {
         switch delivery.outcome {
         case .succeeded:
             smsWebhookLogger.info(
-                "SMS webhook succeeded status=\(delivery.statusCode ?? 0, privacy: .public)"
+                "webhook succeeded status=\(delivery.statusCode ?? 0, privacy: .public)"
             )
         case .failed:
             smsWebhookLogger.error(
-                "SMS webhook failed status=\(delivery.statusCode ?? 0, privacy: .public) detail=\(delivery.detail ?? "", privacy: .public)"
+                "webhook failed status=\(delivery.statusCode ?? 0, privacy: .public) detail=\(delivery.detail ?? "", privacy: .public)"
             )
         }
     }

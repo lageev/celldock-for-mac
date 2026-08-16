@@ -594,6 +594,29 @@ do {
     let filteredHighFrequency = voiceConditioner.process(highFrequency, sampleRate: 48_000)
     let filteredPeak = filteredHighFrequency.suffix(2_400).map(abs).max() ?? 1
     try expect(filteredPeak < 0.2, "voice conditioner did not attenuate alias-prone audio")
+    try expect(
+        CallUplinkPCM.pcm16LE(samples: [1, 1, 1, 1], sampleRate: 16_000).count == 4,
+        "8 kHz PCM downsample length"
+    )
+    let peakPCM = CallUplinkPCM.pcm16LE(samples: [1, 1], sampleRate: 8_000)
+    try expect(
+        peakPCM.count == 2 &&
+            peakPCM.withUnsafeBytes({ $0.load(as: Int16.self) }) == Int16.max,
+        "8 kHz PCM peak sample"
+    )
+    try expect(
+        CallUplinkPCM.pcm16LE(samples: [0], sampleRate: 8_000).isEmpty,
+        "8 kHz PCM rejected a single sample"
+    )
+    let tone = (0 ..< 1_600).map { index in
+        Float(sin(2 * Double.pi * 1_000 * Double(index) / 16_000))
+    }
+    let tonePCM = CallUplinkPCM.pcm16LE(samples: tone, sampleRate: 16_000)
+    try expect(tonePCM.count == 1_600, "16 kHz tone downsample length")
+    let middlePeak = tonePCM.dropFirst(400).prefix(400).withUnsafeBytes { raw in
+        raw.bindMemory(to: Int16.self).map { abs(Int($0)) }.max() ?? 0
+    }
+    try expect(middlePeak > 1_000, "downsampled greeting PCM kept mid-utterance energy")
 
     let singleSubmit = try SMSPDUEncoder.encode(
         destination: "+1234567890",
@@ -3473,8 +3496,9 @@ do {
         !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
         "invalid webhook URL was treated as ready"
     )
-    enabledWebhook.url = "https://api.telegram.org/bot123:abc/sendMessage"
     enabledWebhook.preset = .telegram
+    enabledWebhook.selectedPresets = [.telegram]
+    enabledWebhook.url = "https://api.telegram.org/bot123:abc/sendMessage"
     try expect(
         !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
         "telegram webhook without chat id was treated as ready"
@@ -3484,6 +3508,19 @@ do {
         SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
         "telegram webhook with chat id was skipped"
     )
+    enabledWebhook.forwardedEvents = []
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook),
+        "webhook with no selected events still forwarded SMS"
+    )
+    enabledWebhook.forwardedEvents = [.callMissed]
+    try expect(
+        !SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: enabledWebhook) &&
+            SMSWebhookDeliveryPolicy.shouldDeliver(.callMissed, configuration: enabledWebhook) &&
+            !SMSWebhookDeliveryPolicy.shouldDeliver(.callIncoming, configuration: enabledWebhook),
+        "call-only webhook forwarded the wrong events"
+    )
+    enabledWebhook.forwardedEvents = SMSWebhookConfiguration.defaultForwardedEvents
 
     inboundWebhookMessage.direction = nil
     let webhookEnvelope = SMSWebhookEnvelope.received(inboundWebhookMessage)
@@ -3502,10 +3539,19 @@ do {
             customJSON?["id"] as? String == "webhook-in" &&
             customJSON?["sender"] as? String == "10086" &&
             customJSON?["body"] as? String == "验证码是 482913，5 分钟内有效。" &&
+            customJSON?["text"] as? String == "来自 10086\n验证码是 482913，5 分钟内有效。" &&
             customJSON?["module_id"] as? String == "primary" &&
             customJSON?["verification_code"] as? String == "482913" &&
-            customJSON?["timestamp"] as? String == "2023-11-14T22:13:20Z",
+            customJSON?["timestamp"] as? String == "2023-11-15T06:13:20+08:00" &&
+            customJSON?["received_at"] as? String == "2023-11-15T06:13:20+08:00",
         "inbound webhook payload fields were incorrect"
+    )
+    try expect(
+        Set(SMSWebhookPayloadBuilder.templateValues(
+            for: webhookEnvelope,
+            configuration: customWebhook
+        ).keys) == Set(SMSWebhookPayloadBuilder.placeholderKeys),
+        "webhook template variables drifted from the documented placeholders"
     )
     let customRequest = SMSWebhookPayloadBuilder.request(
         url: URL(string: "https://hooks.example.com/sms")!,
@@ -3529,6 +3575,108 @@ do {
     try expect(
         unsignedWebhookRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == nil,
         "blank webhook secret still produced a secret header"
+    )
+    let legacyWebhookJSON = Data(
+        """
+        {"isEnabled":true,"preset":"custom","url":"https://hooks.example.com/sms","secret":"s3cret","extra":"","bodyTemplate":""}
+        """.utf8
+    )
+    let legacyWebhook = try JSONDecoder().decode(SMSWebhookConfiguration.self, from: legacyWebhookJSON)
+    try expect(
+        legacyWebhook.customHeaders.isEmpty &&
+            legacyWebhook.url == "https://hooks.example.com/sms" &&
+            legacyWebhook.selectedPresets == [.custom] as Set,
+        "legacy webhook state grew custom headers"
+    )
+    try expect(
+        legacyWebhook.forwardedEvents == [.smsReceived],
+        "legacy webhook did not keep SMS forwarding enabled"
+    )
+    var cachedURLWebhook = SMSWebhookConfiguration(
+        preset: .custom,
+        url: "https://hooks.example.com/sms"
+    )
+    cachedURLWebhook.preset = .feishu
+    try expect(
+        cachedURLWebhook.url.isEmpty,
+        "switching webhook preset reused the previous URL"
+    )
+    cachedURLWebhook.url = "https://open.feishu.cn/open-apis/bot/v2/hook/token"
+    cachedURLWebhook.preset = .custom
+    try expect(
+        cachedURLWebhook.url == "https://hooks.example.com/sms",
+        "custom webhook URL was not restored after switching presets"
+    )
+    cachedURLWebhook.preset = .feishu
+    try expect(
+        cachedURLWebhook.url == "https://open.feishu.cn/open-apis/bot/v2/hook/token",
+        "feishu webhook URL was not restored after switching presets"
+    )
+    let cachedURLData = try JSONEncoder().encode(cachedURLWebhook)
+    var restoredURLWebhook = try JSONDecoder().decode(
+        SMSWebhookConfiguration.self,
+        from: cachedURLData
+    )
+    restoredURLWebhook.preset = .custom
+    try expect(
+        restoredURLWebhook.url == "https://hooks.example.com/sms" &&
+            restoredURLWebhook.urls[.feishu] ==
+            "https://open.feishu.cn/open-apis/bot/v2/hook/token",
+        "per-preset webhook URLs were not persisted"
+    )
+    var isolatedExtraWebhook = SMSWebhookConfiguration(
+        preset: .dingtalk,
+        extra: "CellDock"
+    )
+    isolatedExtraWebhook.preset = .telegram
+    try expect(
+        isolatedExtraWebhook.extra.isEmpty,
+        "switching webhook preset reused the previous extra"
+    )
+    isolatedExtraWebhook.extra = "-100123"
+    isolatedExtraWebhook.preset = .dingtalk
+    try expect(
+        isolatedExtraWebhook.extra == "CellDock",
+        "dingtalk webhook extra was not restored after switching presets"
+    )
+    var multiWebhook = SMSWebhookConfiguration(
+        isEnabled: true,
+        url: "https://hooks.example.com/sms"
+    )
+    multiWebhook.preset = .telegram
+    multiWebhook.selectedPresets = [.custom, .telegram]
+    multiWebhook.url = "https://api.telegram.org/bot123:abc/sendMessage"
+    try expect(
+        SMSWebhookDeliveryPolicy.shouldDeliver(inboundWebhookMessage, configuration: multiWebhook) &&
+            multiWebhook.sendablePresets == [.custom],
+        "an incomplete telegram channel blocked the ready custom channel"
+    )
+    multiWebhook.extra = "-100123"
+    try expect(
+        multiWebhook.sendablePresets == [.custom, .telegram],
+        "a ready telegram channel was not included in multi-channel delivery"
+    )
+    var headedWebhook = customWebhook
+    headedWebhook.customHeaders = [
+        SMSWebhookHeader(name: " Authorization ", value: " Bearer abc "),
+        SMSWebhookHeader(name: "X-Trace", value: "sms-1"),
+        SMSWebhookHeader(name: "", value: "ignored"),
+        SMSWebhookHeader(name: "Bad Name", value: "nope"),
+        SMSWebhookHeader(name: "Content-Type", value: "application/json; charset=utf-8")
+    ]
+    let headedRequest = SMSWebhookPayloadBuilder.request(
+        url: URL(string: "https://hooks.example.com/sms")!,
+        configuration: headedWebhook,
+        body: customBody
+    )
+    try expect(
+        headedRequest.value(forHTTPHeaderField: "Authorization") == "Bearer abc" &&
+            headedRequest.value(forHTTPHeaderField: "X-Trace") == "sms-1" &&
+            headedRequest.value(forHTTPHeaderField: "Content-Type") ==
+            "application/json; charset=utf-8" &&
+            headedRequest.value(forHTTPHeaderField: "X-CellDock-Secret") == "s3cret" &&
+            headedRequest.value(forHTTPHeaderField: "Bad Name") == nil,
+        "custom webhook headers were not applied"
     )
 
     let quotedMessage = SMSMessage(
@@ -3558,6 +3706,53 @@ do {
             feishuContent?["text"] as? String == "来自 10086\n验证码是 \"482913\"",
         "feishu webhook body was not rendered as a text message"
     )
+    let missedCall = CallHistoryRecord(
+        id: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
+        direction: .incoming,
+        number: "10086",
+        moduleID: CellularModuleID(rawValue: "primary"),
+        startedAt: webhookNow,
+        connectedAt: nil,
+        endedAt: webhookNow,
+        endReason: .noAnswer
+    )
+    let missedEnvelope = SMSWebhookEnvelope.missedCall(missedCall, displayName: "张三")
+    let missedFeishuBody = try SMSWebhookPayloadBuilder.bodyData(
+        for: missedEnvelope,
+        configuration: feishuWebhook
+    )
+    let missedFeishuJSON = try JSONSerialization.jsonObject(with: missedFeishuBody) as? [String: Any]
+    let missedFeishuContent = missedFeishuJSON?["content"] as? [String: Any]
+    try expect(
+        missedEnvelope.event == "call.missed" &&
+            missedFeishuContent?["text"] as? String == "未接来电\n来自 张三",
+        "missed-call webhook body was not rendered as a text message"
+    )
+    let incomingEnvelope = SMSWebhookEnvelope.incomingCall(
+        number: "10086",
+        displayName: nil,
+        moduleID: CellularModuleID(rawValue: "primary"),
+        now: webhookNow
+    )
+    try expect(
+        incomingEnvelope.event == "call.incoming" &&
+            incomingEnvelope.sender == "10086" &&
+            incomingEnvelope.body == "蜂窝来电",
+        "incoming-call webhook envelope fields were incorrect"
+    )
+    var feishuWithHeaders = feishuWebhook
+    feishuWithHeaders.customHeaders = [
+        SMSWebhookHeader(name: "Authorization", value: "Bearer abc")
+    ]
+    let feishuHeaderRequest = SMSWebhookPayloadBuilder.request(
+        url: URL(string: "https://open.feishu.cn/open-apis/bot/v2/hook/token")!,
+        configuration: feishuWithHeaders,
+        body: feishuBody
+    )
+    try expect(
+        feishuHeaderRequest.value(forHTTPHeaderField: "Authorization") == nil,
+        "non-custom webhook applied custom headers"
+    )
 
     let qqWebhook = SMSWebhookConfiguration(
         isEnabled: true,
@@ -3586,6 +3781,7 @@ do {
     originalPOST.httpMethod = "POST"
     originalPOST.httpBody = Data("{\"text\":\"hi\"}".utf8)
     originalPOST.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    originalPOST.setValue("Bearer abc", forHTTPHeaderField: "Authorization")
     var proposedGET = URLRequest(url: URL(string: "https://hooks.example.com/sms/")!)
     proposedGET.httpMethod = "GET"
     let redirected = SMSWebhookRedirectPolicy.redirectedRequest(
@@ -3595,7 +3791,8 @@ do {
     try expect(
         redirected.httpMethod == "POST" &&
             redirected.httpBody == originalPOST.httpBody &&
-            redirected.value(forHTTPHeaderField: "Content-Type") == "application/json",
+            redirected.value(forHTTPHeaderField: "Content-Type") == "application/json" &&
+            redirected.value(forHTTPHeaderField: "Authorization") == "Bearer abc",
         "webhook redirect dropped the original POST body"
     )
 

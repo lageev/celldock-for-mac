@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CModemBridge
 import CUACProbe
@@ -32,6 +33,7 @@ final class VoiceAudioService {
     private var uacCleanupPending = false
     private var sessionGeneration: UInt64 = 0
     private var uploadBytes = Data()
+    private var greetingBytes = Data()
     private var captureSamples: [Float] = []
     private var capturePosition = 0.0
     private var captureSampleRate = 0.0
@@ -69,8 +71,11 @@ final class VoiceAudioService {
         case .authorized:
             completion(true)
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                DispatchQueue.main.async { completion(granted) }
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    DispatchQueue.main.async { completion(granted) }
+                }
             }
         case .denied, .restricted:
             completion(false)
@@ -431,6 +436,17 @@ final class VoiceAudioService {
         if value { clearUploadBytes() }
     }
 
+    func enqueueUplinkGreeting(_ pcm: Data) {
+        uploadLock.withLock {
+            greetingBytes = pcm
+            uploadBytes.removeAll(keepingCapacity: true)
+        }
+    }
+
+    func cancelUplinkGreeting() {
+        uploadLock.withLock { greetingBytes.removeAll() }
+    }
+
     var isRunning: Bool {
         stateLock.withLock { running }
     }
@@ -563,6 +579,7 @@ final class VoiceAudioService {
             (sessionGeneration == session, running, mediaEnabled, muted)
         }
         guard state.0, state.1, state.2 else { return }
+        if uploadLock.withLock({ !self.greetingBytes.isEmpty }) { return }
         if captureSampleRate != sampleRate {
             captureSamples.removeAll(keepingCapacity: true)
             capturePosition = 0
@@ -641,17 +658,25 @@ final class VoiceAudioService {
             }
             muteWasEnabled = state.2
 
-            let uplinkFrames = takeUploadSamples(into: &uplinkSamples)
-            if uplinkFrames > 0 {
+            let take = takeUploadSamples(into: &uplinkSamples)
+            if take.frameCount > 0 {
                 let acceptedFrames = uplinkSamples.withUnsafeBufferPointer { samples in
                     celldock_uac_probe_write_uplink_pcm16(
                         uac,
                         samples.baseAddress,
-                        uplinkFrames
+                        take.frameCount
+                    )
+                }
+                if acceptedFrames < take.frameCount {
+                    restoreUnacceptedUploadSamples(
+                        uplinkSamples,
+                        acceptedFrames: acceptedFrames,
+                        offeredFrames: take.frameCount,
+                        fromGreeting: take.fromGreeting
                     )
                 }
                 if acceptedFrames > 0 {
-                    let byteCount = min(acceptedFrames, uplinkFrames) * MemoryLayout<Int16>.size
+                    let byteCount = min(acceptedFrames, take.frameCount) * MemoryLayout<Int16>.size
                     let pcm = uplinkSamples.withUnsafeBytes { bytes in
                         Data(bytes: bytes.baseAddress!, count: byteCount)
                     }
@@ -840,6 +865,9 @@ final class VoiceAudioService {
 
     private func takeUploadChunkOrSilence() -> Data {
         uploadLock.withLock {
+            if !greetingBytes.isEmpty {
+                return takeExactPCMChunk(from: &greetingBytes, size: transmitChunkBytes)
+            }
             if uploadBytes.count >= transmitChunkBytes {
                 let chunk = Data(uploadBytes.prefix(transmitChunkBytes))
                 uploadBytes.removeFirst(transmitChunkBytes)
@@ -852,25 +880,67 @@ final class VoiceAudioService {
         }
     }
 
-    private func takeUploadSamples(into samples: inout [Int16]) -> Int {
-        guard !samples.isEmpty else { return 0 }
+    private func takeUploadSamples(into samples: inout [Int16]) -> (frameCount: Int, fromGreeting: Bool) {
+        guard !samples.isEmpty else { return (0, false) }
         return uploadLock.withLock {
-            let frameCount = min(
-                samples.count,
-                uploadBytes.count / MemoryLayout<Int16>.size
-            )
-            guard frameCount > 0 else { return 0 }
-            uploadBytes.withUnsafeBytes { rawBuffer in
-                let bytes = rawBuffer.bindMemory(to: UInt8.self)
-                for frame in 0 ..< frameCount {
-                    let bits = UInt16(bytes[frame * 2]) |
-                        UInt16(bytes[frame * 2 + 1]) << 8
-                    samples[frame] = Int16(bitPattern: bits)
-                }
+            if !greetingBytes.isEmpty {
+                return (copyPCM16(from: &greetingBytes, into: &samples), true)
             }
-            uploadBytes.removeFirst(frameCount * MemoryLayout<Int16>.size)
-            return frameCount
+            return (copyPCM16(from: &uploadBytes, into: &samples), false)
         }
+    }
+
+    private func restoreUnacceptedUploadSamples(
+        _ samples: [Int16],
+        acceptedFrames: Int,
+        offeredFrames: Int,
+        fromGreeting: Bool
+    ) {
+        // Greeting PCM is pre-buffered. The 256 ms UAC ring cannot take a
+        // 64 ms slice every 5 ms, so unused frames must go back in order.
+        guard acceptedFrames >= 0,
+              acceptedFrames < offeredFrames,
+              offeredFrames <= samples.count else { return }
+        var pcm = Data()
+        pcm.reserveCapacity((offeredFrames - acceptedFrames) * MemoryLayout<Int16>.size)
+        for index in acceptedFrames ..< offeredFrames {
+            var littleEndian = samples[index].littleEndian
+            withUnsafeBytes(of: &littleEndian) { pcm.append(contentsOf: $0) }
+        }
+        uploadLock.withLock {
+            if fromGreeting {
+                greetingBytes = pcm + greetingBytes
+            } else {
+                uploadBytes = pcm + uploadBytes
+            }
+        }
+    }
+
+    private func takeExactPCMChunk(from data: inout Data, size: Int) -> Data {
+        if data.count >= size {
+            let chunk = Data(data.prefix(size))
+            data.removeFirst(size)
+            return chunk
+        }
+        var chunk = data
+        data.removeAll(keepingCapacity: true)
+        chunk.append(Data(repeating: 0, count: size - chunk.count))
+        return chunk
+    }
+
+    private func copyPCM16(from data: inout Data, into samples: inout [Int16]) -> Int {
+        let frameCount = min(samples.count, data.count / MemoryLayout<Int16>.size)
+        guard frameCount > 0 else { return 0 }
+        data.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            for frame in 0 ..< frameCount {
+                let bits = UInt16(bytes[frame * 2]) |
+                    UInt16(bytes[frame * 2 + 1]) << 8
+                samples[frame] = Int16(bitPattern: bits)
+            }
+        }
+        data.removeFirst(frameCount * MemoryLayout<Int16>.size)
+        return frameCount
     }
 
     private func clearUploadBytes() {
@@ -887,6 +957,7 @@ final class VoiceAudioService {
 
     private func resetBuffers() {
         clearUploadBytes()
+        cancelUplinkGreeting()
         playbackQueue.async { [weak self] in
             self?.scheduledPlaybackFrames = 0
         }
@@ -900,6 +971,7 @@ final class VoiceAudioService {
 
     private func resetBuffersSynchronously() {
         clearUploadBytes()
+        cancelUplinkGreeting()
         playbackQueue.sync {
             scheduledPlaybackFrames = 0
         }

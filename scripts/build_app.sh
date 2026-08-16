@@ -99,6 +99,7 @@ else
 fi
 OUTPUT_DIR="$ROOT/outputs"
 APP="$OUTPUT_DIR/CellDock.app"
+APP_ENTITLEMENTS="$ROOT/Resources/CellDock.entitlements"
 ZIP="$OUTPUT_DIR/CellDock-$VERSION-arm64$ARCHIVE_SUFFIX.zip"
 PUBLISH_ZIP="$OUTPUT_DIR/.CellDock-$VERSION-arm64$ARCHIVE_SUFFIX.$$.zip"
 STAGE_DIR="$(mktemp -d /tmp/CellDock-build.XXXXXX)"
@@ -227,6 +228,7 @@ codesign \
   --force \
   --sign "$SIGN_IDENTITY" \
   "${CODESIGN_OPTIONS[@]}" \
+  --entitlements "$APP_ENTITLEMENTS" \
   "${APP_REQUIREMENT_OPTIONS[@]}" \
   --identifier app.celldock.mac \
   "$STAGE_APP"
@@ -271,6 +273,16 @@ codesign --verify --deep --strict --verbose=2 "$VERIFY_APP"
 codesign --verify --strict --verbose=2 "$VERIFY_HELPER"
 codesign --verify --strict --verbose=2 "$VERIFY_VOWIFI_RUNTIME"
 codesign --verify --deep --strict --verbose=2 "$VERIFY_SPARKLE"
+VERIFY_AUDIO_INPUT_ENTITLEMENT="$(
+  codesign -d --entitlements :- "$VERIFY_APP" 2>/dev/null |
+    xmllint \
+      --xpath 'name(//key[text()="com.apple.security.device.audio-input"]/following-sibling::*[1])' \
+      -
+)"
+[[ "$VERIFY_AUDIO_INPUT_ENTITLEMENT" == "true" ]] || {
+  print -u2 "Archive app is missing the audio-input entitlement."
+  exit 1
+}
 if [[ "$SIGNING_MODE" != development ]]; then
   for hardened_code in "$VERIFY_APP" "$VERIFY_HELPER" "$VERIFY_VOWIFI_RUNTIME"; do
     HARDENED_SIGNING_INFO="$(codesign -dvv "$hardened_code" 2>&1)"

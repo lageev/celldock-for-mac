@@ -707,7 +707,7 @@ final class ModemService {
                     guard granted else {
                         self.invalidateCallAction()
                         DispatchQueue.main.async {
-                            completion(.failure(L10n.tr("需要麦克风权限才能进行通话。请在系统设置中允许后重试。")))
+                            completion(.failure(L10n.tr("需要麦克风权限才能通话。请到设置 → 隐私权限 → 麦克风授权后再试。")))
                         }
                         return
                     }
@@ -744,7 +744,7 @@ final class ModemService {
                     guard granted else {
                         self.invalidateCallAction()
                         DispatchQueue.main.async {
-                            completion(.failure(L10n.tr("需要麦克风权限才能接听。请在系统设置中允许后重试。")))
+                            completion(.failure(L10n.tr("需要麦克风权限才能通话。请到设置 → 隐私权限 → 麦克风授权后再试。")))
                         }
                         return
                     }
@@ -789,6 +789,13 @@ final class ModemService {
             self.voiceAudio.setMuted(muted)
             self.callSnapshot.muted = muted
             self.publishCallSnapshot()
+        }
+    }
+
+    func playUplinkGreeting(_ pcm: Data) {
+        queue.async { [weak self] in
+            guard let self, self.callSnapshot.hasCall else { return }
+            self.voiceAudio.enqueueUplinkGreeting(pcm)
         }
     }
 

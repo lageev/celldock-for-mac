@@ -264,7 +264,7 @@ private struct CallIslandView: View {
                         systemImage: "phone.fill",
                         tint: .green,
                         isProminent: true,
-                        isEnabled: canAnswer,
+                        isEnabled: !appState.isChangingCall,
                         action: appState.answerCall
                     )
                 }
@@ -538,11 +538,6 @@ private struct CallIslandView: View {
 
     private var avatarTint: Color {
         appState.call.phase == .incoming ? .orange : .blue
-    }
-
-    private var canAnswer: Bool {
-        appState.call.voiceOverUSBSupported &&
-            !appState.isChangingCall
     }
 
     private var canToggleRecording: Bool {

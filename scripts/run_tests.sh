@@ -36,6 +36,7 @@ swiftc \
   "$ROOT/Sources/CellDock/CallATParser.swift" \
   "$ROOT/Sources/CellDock/ATConsoleModels.swift" \
   "$ROOT/Sources/CellDock/VoiceSignalProcessor.swift" \
+  "$ROOT/Sources/CellDock/CallUplinkPCM.swift" \
   "$ROOT/Sources/CellDock/CarrierNameFormatter.swift" \
   "$ROOT/Sources/CellDock/NotificationRouting.swift" \
   "$ROOT/Sources/CellDock/LaunchAtLoginController.swift" \

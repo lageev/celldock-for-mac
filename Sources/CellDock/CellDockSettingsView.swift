@@ -7,7 +7,7 @@ struct CellDockSettingsView: View {
     private enum Category: String, CaseIterable {
         case general = "通用"
         case communications = "蜂窝与通信"
-        case webhook = "短信 Webhook"
+        case webhook = "通知转发"
         case permissions = "通知与权限"
         case updates = "软件更新"
 
@@ -27,7 +27,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return L10n.tr("启动、外观与菜单栏行为")
             case .communications: return L10n.tr("查看模块状态并管理通话与短信处理")
-            case .webhook: return L10n.tr("配置 Webhook 地址并查看短信转发状态")
+            case .webhook: return L10n.tr("配置出站渠道，并选择要转发的通知")
             case .permissions: return L10n.tr("检查 CellDock 的系统访问权限")
             case .updates: return L10n.tr("检查版本并选择更新频道")
             }
@@ -37,7 +37,7 @@ struct CellDockSettingsView: View {
             switch self {
             case .general: return L10n.tr("外观、语言与启动")
             case .communications: return L10n.tr("声音、通话与短信")
-            case .webhook: return L10n.tr("预设、请求体与转发状态")
+            case .webhook: return L10n.tr("渠道与通知类型")
             case .permissions: return L10n.tr("通知与系统访问权限")
             case .updates: return L10n.tr("版本与更新频道")
             }
@@ -50,6 +50,7 @@ struct CellDockSettingsView: View {
     @ObservedObject private var languageController = AppLanguageController.shared
     @ObservedObject private var updaterManager = UpdaterManager.shared
     @ObservedObject private var smsWebhook = SMSWebhookService.shared
+    @ObservedObject private var autoAnswerGreeting = AutoAnswerGreetingStore.shared
     @Binding private var sidebarWidth: CGFloat
     private let focusFirstItemRequest: Bool
     private let didHandleFocusFirstItemRequest: () -> Void
@@ -61,6 +62,7 @@ struct CellDockSettingsView: View {
     @State private var isConfirmingVerificationAutoDelete = false
     @State private var isConfirmingAutomaticRecording = false
     @State private var soundImportError: String?
+    @State private var isWebhookVariableHelpPresented = false
     @State private var microphoneAuthorizationStatus =
         AVCaptureDevice.authorizationStatus(for: .audio)
     @FocusState private var listFocused: Bool
@@ -507,6 +509,100 @@ struct CellDockSettingsView: View {
                 }
             }
 
+            settingsSection(title: L10n.tr("来电")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    settingRow(
+                        title: L10n.tr("来电自动接通"),
+                        detail: L10n.tr("检测到来电后自动接听，无需手动点接听")
+                    ) {
+                        Toggle("来电自动接通", isOn: Binding(
+                            get: { appState.automaticallyAnswerIncomingCalls },
+                            set: { appState.setAutomaticallyAnswerIncomingCalls($0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.adaptiveGlass)
+                    }
+
+                    if microphoneAuthorizationStatus != .authorized {
+                        inlineCallout(
+                            L10n.tr("自动接通不检查麦克风权限。未允许时对方可能听不到你说话。"),
+                            systemImage: "mic.slash",
+                            color: .orange
+                        )
+                    }
+
+                    Divider()
+
+                    settingRow(
+                        title: L10n.tr("应答语音"),
+                        detail: autoAnswerGreetingDetail
+                    ) {
+                        Picker("应答语音", selection: Binding(
+                            get: { autoAnswerGreeting.source },
+                            set: { autoAnswerGreeting.setSource($0) }
+                        )) {
+                            ForEach(AutoAnswerGreetingSource.allCases) { source in
+                                Text(source.title).tag(source)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 160)
+                    }
+
+                    if autoAnswerGreeting.source == .text {
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField(
+                                L10n.tr("接通后向对方播放的文字"),
+                                text: Binding(
+                                    get: { autoAnswerGreeting.text },
+                                    set: { autoAnswerGreeting.setText($0) }
+                                ),
+                                axis: .vertical
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(2 ... 4)
+
+                            HStack {
+                                Spacer(minLength: 0)
+                                greetingPreviewButton
+                            }
+                        }
+                    } else if autoAnswerGreeting.source == .recording {
+                        HStack(spacing: 8) {
+                            Button("选择…") {
+                                chooseGreetingRecording()
+                            }
+                            .adaptiveGlassButton()
+                            .controlSize(.small)
+
+                            Button(
+                                autoAnswerGreeting.isRecording
+                                    ? L10n.tr("停止录制")
+                                    : L10n.tr("开始录制")
+                            ) {
+                                toggleGreetingRecording()
+                            }
+                            .adaptiveGlassButton()
+                            .controlSize(.small)
+
+                            greetingPreviewButton
+
+                            Button("清除") {
+                                autoAnswerGreeting.clearRecording()
+                            }
+                            .adaptiveGlassButton()
+                            .controlSize(.small)
+                            .disabled(
+                                autoAnswerGreeting.recordingDisplayName == nil &&
+                                    !autoAnswerGreeting.isRecording
+                            )
+                        }
+                    }
+                }
+                .padding(16)
+            }
+
             settingsSection(title: L10n.tr("通话录音")) {
                 settingRow(
                     title: L10n.tr("通话时自动录音"),
@@ -561,15 +657,15 @@ struct CellDockSettingsView: View {
 
     private var webhookSettings: some View {
         VStack(spacing: 16) {
-            settingsSection(title: L10n.tr("Webhook 参数")) {
+            settingsSection(title: L10n.tr("转发哪些通知")) {
                 VStack(alignment: .leading, spacing: 12) {
                     settingRow(
-                        title: L10n.tr("启用短信转发"),
+                        title: L10n.tr("启用通知转发"),
                         status: smsWebhook.configuration.isEnabled ? L10n.tr("已开启") : nil,
                         statusColor: .green,
-                        detail: L10n.tr("收到新短信后立即 POST JSON 到指定地址")
+                        detail: L10n.tr("将勾选的通知 POST JSON 到指定地址")
                     ) {
-                        Toggle("启用短信转发", isOn: Binding(
+                        Toggle("启用通知转发", isOn: Binding(
                             get: { smsWebhook.configuration.isEnabled },
                             set: { smsWebhook.setEnabled($0) }
                         ))
@@ -577,23 +673,51 @@ struct CellDockSettingsView: View {
                         .toggleStyle(.adaptiveGlass)
                     }
 
-                    Divider()
-
-                    settingRow(
-                        title: L10n.tr("Webhook 类型"),
-                        detail: L10n.tr("选择机器人类型后会填入对应请求体，可再自行修改。")
-                    ) {
-                        Picker(L10n.tr("Webhook 类型"), selection: Binding(
-                            get: { smsWebhook.configuration.preset },
-                            set: { smsWebhook.setPreset($0) }
-                        )) {
-                            ForEach(SMSWebhookPreset.allCases) { preset in
-                                Text(preset.title).tag(preset)
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(SMSWebhookEventKind.allCases) { kind in
+                            Divider()
+                            settingRow(
+                                title: kind.title,
+                                detail: kind.detail
+                            ) {
+                                Toggle(kind.title, isOn: Binding(
+                                    get: { smsWebhook.configuration.forwards(kind) },
+                                    set: { smsWebhook.setEvent(kind, enabled: $0) }
+                                ))
+                                .labelsHidden()
+                                .toggleStyle(.adaptiveGlass)
                             }
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: 220)
+                    }
+                    .padding(.leading, 20)
+                    .disabled(!smsWebhook.configuration.isEnabled)
+
+                    if smsWebhook.configuration.isEnabled,
+                       smsWebhook.configuration.forwardedEvents.isEmpty {
+                        inlineCallout(
+                            L10n.tr("请至少勾选一种要转发的通知。"),
+                            systemImage: "exclamationmark.triangle.fill",
+                            color: .orange
+                        )
+                    }
+                }
+                .padding(16)
+            }
+
+            settingsSection(title: L10n.tr("出站渠道")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(L10n.tr("Webhook 类型"))
+                            .font(.headline)
+                        Text(L10n.tr("可多选。点选渠道后填写该渠道的地址；请求体会按类型填入，可再自行修改。"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        WrappingHStack(spacing: 8) {
+                            ForEach(SMSWebhookPreset.allCases) { preset in
+                                webhookPresetChip(preset)
+                            }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
@@ -644,9 +768,32 @@ struct CellDockSettingsView: View {
                         }
                     }
 
+                    if smsWebhook.configuration.preset == .custom {
+                        webhookCustomHeaders
+                    }
+
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(L10n.tr("请求体"))
-                            .font(.headline)
+                        HStack(spacing: 6) {
+                            Text(L10n.tr("请求体"))
+                                .font(.headline)
+                            Button {
+                                isWebhookVariableHelpPresented = true
+                            } label: {
+                                Image(systemName: "info.circle")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color.accentColor)
+                            }
+                            .buttonStyle(.plain)
+                            .help(L10n.tr("查看可用变量"))
+                            .accessibilityLabel(L10n.tr("查看可用变量"))
+                            .popover(
+                                isPresented: $isWebhookVariableHelpPresented,
+                                arrowEdge: .bottom
+                            ) {
+                                webhookVariableHelpPopover
+                            }
+                            Spacer(minLength: 0)
+                        }
                         TextEditor(
                             text: Binding(
                                 get: { smsWebhook.configuration.effectiveBodyTemplate },
@@ -661,29 +808,10 @@ struct CellDockSettingsView: View {
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
                                 .fill(Color.primary.opacity(0.05))
                         )
-                        Text(L10n.tr("可用变量：{{sender}}、{{body}}、{{text}}、{{id}}、{{timestamp}}、{{module_id}}、{{verification_code}}、{{chat_id}}"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    inlineCallout(
-                        L10n.tr("短信正文会发送到你配置的地址，请只填写受信任的接收端。"),
-                        systemImage: "exclamationmark.triangle.fill",
-                        color: .orange
-                    )
-                }
-                .padding(16)
-            }
-
-            settingsSection(title: L10n.tr("转发状态")) {
-                VStack(spacing: 12) {
-                    settingRow(
-                        title: webhookStatusTitle,
-                        status: webhookStatusLabel,
-                        statusColor: webhookStatusColor,
-                        detail: webhookStatusDetail
-                    ) {
+                    HStack {
+                        Spacer(minLength: 0)
                         if smsWebhook.inFlightCount > 0 {
                             ProgressView()
                                 .controlSize(.small)
@@ -693,18 +821,31 @@ struct CellDockSettingsView: View {
                             }
                             .adaptiveGlassButton()
                             .controlSize(.small)
-                            .disabled(!smsWebhook.configuration.hasSendableDestination)
+                            .disabled(smsWebhook.configuration.sendablePresets.isEmpty)
                         }
                     }
 
                     if smsWebhook.configuration.isEnabled,
-                       smsWebhook.configuration.resolvedURL == nil {
+                       smsWebhook.configuration.selectedPresets.isEmpty {
+                        inlineCallout(
+                            L10n.tr("请至少选择一个出站渠道。"),
+                            systemImage: "exclamationmark.triangle.fill",
+                            color: .orange
+                        )
+                    } else if smsWebhook.configuration.isEnabled,
+                              smsWebhook.configuration.selectedPresets.contains(
+                                smsWebhook.configuration.preset
+                              ),
+                              smsWebhook.configuration.resolvedURL == nil {
                         inlineCallout(
                             L10n.tr("请填写有效的 http 或 https 地址。"),
                             systemImage: "exclamationmark.triangle.fill",
                             color: .orange
                         )
                     } else if smsWebhook.configuration.isEnabled,
+                              smsWebhook.configuration.selectedPresets.contains(
+                                smsWebhook.configuration.preset
+                              ),
                               smsWebhook.configuration.preset.requiresChatID,
                               smsWebhook.configuration.trimmedExtra.isEmpty {
                         inlineCallout(
@@ -713,77 +854,136 @@ struct CellDockSettingsView: View {
                             color: .orange
                         )
                     }
+
+                    inlineCallout(
+                        L10n.tr("通知内容会发送到你配置的地址，请只填写受信任的接收端。"),
+                        systemImage: "exclamationmark.triangle.fill",
+                        color: .orange
+                    )
                 }
                 .padding(16)
             }
         }
     }
 
-    private var webhookStatusTitle: String {
-        if smsWebhook.inFlightCount > 0 {
-            return L10n.tr("正在转发")
-        }
-        if !smsWebhook.configuration.isEnabled {
-            return L10n.tr("已关闭")
-        }
-        if smsWebhook.configuration.resolvedURL == nil {
-            return L10n.tr("未配置")
-        }
-        guard let delivery = smsWebhook.lastDelivery else {
-            return L10n.tr("等待短信")
-        }
-        switch delivery.outcome {
-        case .succeeded: return L10n.tr("转发成功")
-        case .failed: return L10n.tr("转发失败")
-        }
-    }
+    private var webhookVariableHelpPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(L10n.tr("可用变量"))
+                .font(.headline)
+            Text(L10n.tr("在请求体中写成 {{event}} 这种形式，发送时会替换成实际内容。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-    private var webhookStatusLabel: String? {
-        guard smsWebhook.inFlightCount == 0,
-              let delivery = smsWebhook.lastDelivery else {
-            return nil
-        }
-        return delivery.date.formatted(date: .abbreviated, time: .shortened)
-    }
+            Divider()
 
-    private var webhookStatusColor: Color {
-        if smsWebhook.inFlightCount > 0 { return .blue }
-        if !smsWebhook.configuration.isEnabled { return .secondary }
-        if smsWebhook.configuration.resolvedURL == nil { return .orange }
-        switch smsWebhook.lastDelivery?.outcome {
-        case .succeeded: return .green
-        case .failed: return .red
-        case nil: return .secondary
-        }
-    }
-
-    private var webhookStatusDetail: String? {
-        guard smsWebhook.inFlightCount == 0,
-              let delivery = smsWebhook.lastDelivery else {
-            return nil
-        }
-        if delivery.outcome == .succeeded, let statusCode = delivery.statusCode {
-            return L10n.tr("上次成功：%@", L10n.tr("HTTP %lld", Int64(statusCode)))
-        }
-        if delivery.outcome == .failed {
-            if let detail = delivery.detail, !detail.isEmpty {
-                if let statusCode = delivery.statusCode, (200..<300).contains(statusCode) {
-                    return L10n.tr("上次失败：%@", detail)
+            ForEach(SMSWebhookPayloadBuilder.placeholderHelpItems, id: \.key) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text("{{\(item.key)}}")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(width: 158, alignment: .leading)
+                    Text(item.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
                 }
-                if let statusCode = delivery.statusCode {
-                    return L10n.tr(
-                        "上次失败：%@",
-                        "\(L10n.tr("HTTP %lld", Int64(statusCode))) · \(detail)"
-                    )
-                }
-                return L10n.tr("上次失败：%@", detail)
             }
-            return L10n.tr(
-                "上次失败：%@",
-                delivery.statusCode.map { L10n.tr("HTTP %lld", Int64($0)) } ?? L10n.tr("未知")
-            )
         }
-        return nil
+        .padding(16)
+        .frame(width: 420)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.tr("可用变量"))
+    }
+
+    private var webhookCustomHeaders: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L10n.tr("请求头"))
+                .font(.headline)
+            ForEach(smsWebhook.configuration.customHeaders) { header in
+                HStack(spacing: 8) {
+                    TextField(
+                        L10n.tr("名称"),
+                        text: webhookHeaderBinding(header, \.name)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 160)
+                    TextField(
+                        L10n.tr("值"),
+                        text: webhookHeaderBinding(header, \.value)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    Button(role: .destructive) {
+                        var headers = smsWebhook.configuration.customHeaders
+                        headers.removeAll { $0.id == header.id }
+                        smsWebhook.setCustomHeaders(headers)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel(L10n.tr("删除请求头"))
+                }
+            }
+            Button(L10n.tr("添加请求头"), systemImage: "plus") {
+                var headers = smsWebhook.configuration.customHeaders
+                headers.append(SMSWebhookHeader())
+                smsWebhook.setCustomHeaders(headers)
+            }
+            .adaptiveGlassButton()
+            .controlSize(.small)
+            Text(L10n.tr("会随 POST 请求一起发送，可覆盖默认的 Content-Type 和 User-Agent。"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func webhookPresetChip(_ preset: SMSWebhookPreset) -> some View {
+        let selected = smsWebhook.configuration.selectedPresets.contains(preset)
+        let focused = smsWebhook.configuration.preset == preset
+        return Button {
+            smsWebhook.setPreset(preset)
+        } label: {
+            Text(preset.title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 11)
+                .padding(.vertical, 6)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(selected ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+                )
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(
+                            focused
+                                ? Color.accentColor
+                                : selected ? Color.accentColor.opacity(0.55) : Color.primary.opacity(0.10),
+                            lineWidth: focused ? 1.5 : 1
+                        )
+                }
+                .foregroundStyle(selected ? Color.accentColor : Color.primary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+    }
+
+    private func webhookHeaderBinding(
+        _ header: SMSWebhookHeader,
+        _ keyPath: WritableKeyPath<SMSWebhookHeader, String>
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                smsWebhook.configuration.customHeaders.first(where: { $0.id == header.id })?[keyPath: keyPath]
+                    ?? header[keyPath: keyPath]
+            },
+            set: { value in
+                var headers = smsWebhook.configuration.customHeaders
+                guard let index = headers.firstIndex(where: { $0.id == header.id }) else { return }
+                headers[index][keyPath: keyPath] = value
+                smsWebhook.setCustomHeaders(headers)
+            }
+        )
     }
 
     private func soundSettingRow(_ kind: AlertSoundKind) -> some View {
@@ -1158,16 +1358,105 @@ struct CellDockSettingsView: View {
             : L10n.tr("系统设置…")
     }
 
-    private func handleMicrophonePermissionAction() {
-        if microphoneAuthorizationStatus == .notDetermined {
-            AVCaptureDevice.requestAccess(for: .audio) { _ in
-                DispatchQueue.main.async {
-                    microphoneAuthorizationStatus =
-                        AVCaptureDevice.authorizationStatus(for: .audio)
+    private var autoAnswerGreetingDetail: String {
+        switch autoAnswerGreeting.source {
+        case .none:
+            return L10n.tr("接通后不播放应答")
+        case .text:
+            return L10n.tr("接通后向对方播放文字语音")
+        case .recording:
+            return autoAnswerGreeting.recordingDisplayName ?? L10n.tr("尚未选择录音")
+        }
+    }
+
+    private var greetingPreviewButton: some View {
+        Button {
+            do {
+                try autoAnswerGreeting.togglePreview()
+            } catch {
+                soundImportError = error.localizedDescription
+            }
+        } label: {
+            Label(
+                autoAnswerGreeting.isPreviewing ? L10n.tr("停止") : L10n.tr("试听"),
+                systemImage: autoAnswerGreeting.isPreviewing ? "stop.fill" : "play.fill"
+            )
+        }
+        .adaptiveGlassButton()
+        .controlSize(.small)
+        .disabled(
+            autoAnswerGreeting.isRecording ||
+                (autoAnswerGreeting.source == .text &&
+                    autoAnswerGreeting.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) ||
+                (autoAnswerGreeting.source == .recording &&
+                    autoAnswerGreeting.recordingDisplayName == nil)
+        )
+    }
+
+    private func chooseGreetingRecording() {
+        let panel = NSOpenPanel()
+        panel.title = L10n.tr("选择录音…")
+        panel.prompt = L10n.tr("选择")
+        panel.message = L10n.tr("音频将复制到 CellDock 的应用支持目录，原文件可以安全移动或删除。")
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { response in
+            guard response == .OK, let sourceURL = panel.url else { return }
+            Task { @MainActor in
+                do {
+                    try autoAnswerGreeting.installRecording(from: sourceURL)
+                } catch {
+                    soundImportError = error.localizedDescription
                 }
             }
+        }
+    }
+
+    private func toggleGreetingRecording() {
+        if autoAnswerGreeting.isRecording {
+            do {
+                try autoAnswerGreeting.stopRecording()
+            } catch {
+                soundImportError = error.localizedDescription
+            }
+            return
+        }
+        let start = {
+            do {
+                try autoAnswerGreeting.startRecording()
+            } catch {
+                soundImportError = error.localizedDescription
+            }
+        }
+        if microphoneAuthorizationStatus == .notDetermined {
+            requestMicrophoneAccess { granted in
+                if granted { start() }
+            }
+        } else if microphoneAuthorizationStatus == .authorized {
+            start()
+        } else {
+            soundImportError = L10n.tr("需要麦克风权限才能录制应答语音。")
+        }
+    }
+
+    private func handleMicrophonePermissionAction() {
+        if microphoneAuthorizationStatus == .notDetermined {
+            requestMicrophoneAccess { _ in }
         } else {
             openPrivacySettings(anchor: "Privacy_Microphone")
+        }
+    }
+
+    private func requestMicrophoneAccess(completion: @escaping (Bool) -> Void) {
+        NSApp.activate(ignoringOtherApps: true)
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+            DispatchQueue.main.async {
+                microphoneAuthorizationStatus =
+                    AVCaptureDevice.authorizationStatus(for: .audio)
+                completion(granted)
+            }
         }
     }
 
@@ -1195,5 +1484,56 @@ struct CellDockSettingsView: View {
         appState.refreshSystemSettingsStatus()
         contacts.reload()
         microphoneAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+}
+
+private struct WrappingHStack: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(proposal: proposal, subviews: subviews).size
+    }
+
+    func placeSubviews(
+        in bounds: CGRect,
+        proposal: ProposedViewSize,
+        subviews: Subviews,
+        cache: inout ()
+    ) {
+        for item in arrange(
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height),
+            subviews: subviews
+        ).items {
+            subviews[item.index].place(
+                at: CGPoint(x: bounds.minX + item.origin.x, y: bounds.minY + item.origin.y),
+                proposal: ProposedViewSize(item.size)
+            )
+        }
+    }
+
+    private func arrange(
+        proposal: ProposedViewSize,
+        subviews: Subviews
+    ) -> (size: CGSize, items: [(index: Int, origin: CGPoint, size: CGSize)]) {
+        let maxWidth = proposal.width ?? .infinity
+        var items: [(index: Int, origin: CGPoint, size: CGSize)] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var width: CGFloat = 0
+
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            if x > 0, x + size.width > maxWidth {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            items.append((index, CGPoint(x: x, y: y), size))
+            rowHeight = max(rowHeight, size.height)
+            x += size.width + spacing
+            width = max(width, x - spacing)
+        }
+        return (CGSize(width: width, height: y + rowHeight), items)
     }
 }

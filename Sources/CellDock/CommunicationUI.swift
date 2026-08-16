@@ -376,8 +376,7 @@ private struct CommunicationIconActionButtonStyle: ButtonStyle {
             .adaptiveGlassSurface(
                 cornerRadius: cornerRadius,
                 treatment: .regular,
-                tint: tint.opacity(isEnabled ? 0.82 : 0.34),
-                isInteractive: isEnabled
+                tint: tint.opacity(isEnabled ? 0.82 : 0.34)
             )
             .scaleEffect(isPressed ? 0.96 : 1)
             .brightness(configuration.isPressed ? -0.04 : 0)
@@ -415,8 +414,7 @@ struct CircularLiquidCallButton: View {
                     .adaptiveGlassSurface(
                         cornerRadius: diameter / 2,
                         treatment: prominent || selected ? .regular : .clear,
-                        tint: controlTint,
-                        isInteractive: isEnabled
+                        tint: controlTint
                     )
                     .contentShape(Circle())
 

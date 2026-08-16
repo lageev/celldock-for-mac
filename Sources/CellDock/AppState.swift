@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Combine
 import Foundation
 import CellDockNetworkIPC
@@ -56,6 +57,7 @@ final class AppState: ObservableObject {
     @Published private(set) var hideMenuBarIconWhenDisconnected: Bool
     @Published private(set) var autoDeleteReadVerificationMessages: Bool
     @Published private(set) var automaticallyRecordCalls: Bool
+    @Published private(set) var automaticallyAnswerIncomingCalls: Bool
     @Published private(set) var isPresentationPrivacyEnabled: Bool
     @Published private(set) var isMenuBarStatusItemVisible: Bool
     @Published private(set) var showsMenuBarNetworkSpeed: Bool
@@ -111,6 +113,8 @@ final class AppState: ObservableObject {
     private var initialSetupWasPresentedForCurrentInsertion = false
     private var initialSetupPresentationIsActive = false
     private var automaticRecordingAttemptedCallID: UUID?
+    private var pendingAutoAnswerGreeting = false
+    private var isRequestingMicrophoneAccess = false
     private let privacyAliasSalt: String
     private static let initialSetupCompletedKey = "CellDockInitialSetupCompleted.v1"
     private static let networkServiceRecordKey = "CellDock.modemNetworkServiceRecord"
@@ -120,6 +124,7 @@ final class AppState: ObservableObject {
     private static let autoDeleteReadVerificationMessagesKey =
         "AutoDeleteReadVerificationMessages.v1"
     private static let automaticallyRecordCallsKey = "AutomaticallyRecordCalls.v1"
+    private static let automaticallyAnswerIncomingCallsKey = "AutomaticallyAnswerIncomingCalls.v1"
 
     init() {
         try? launchAtLoginController.migrateLegacyRegistrationIfNeeded()
@@ -130,6 +135,9 @@ final class AppState: ObservableObject {
         )
         automaticallyRecordCalls = UserDefaults.standard.bool(
             forKey: Self.automaticallyRecordCallsKey
+        )
+        automaticallyAnswerIncomingCalls = UserDefaults.standard.bool(
+            forKey: Self.automaticallyAnswerIncomingCallsKey
         )
         isPresentationPrivacyEnabled = UserDefaults.standard.bool(
             forKey: PrivacyProtectionPreferences.enabledKey
@@ -980,21 +988,13 @@ final class AppState: ObservableObject {
         } else {
             if let activeCallModuleID, activeCallModuleID != moduleID {
                 if let completedCall, completedCall.isMissed {
-                    NotificationService.shared.postMissedCall(
-                        completedCall,
-                        displayName: SystemContactStore.shared.displayName(for: completedCall.number),
-                        presentation: privacyPresentation
-                    )
+                    postMissedCallNotification(completedCall)
                 }
                 return
             }
             if activeCallModuleID == nil, currentCommunicationModuleID != moduleID {
                 if let completedCall, completedCall.isMissed {
-                    NotificationService.shared.postMissedCall(
-                        completedCall,
-                        displayName: SystemContactStore.shared.displayName(for: completedCall.number),
-                        presentation: privacyPresentation
-                    )
+                    postMissedCallNotification(completedCall)
                 }
                 return
             }
@@ -1012,22 +1012,38 @@ final class AppState: ObservableObject {
         }
         if taggedSnapshot.hasCall {
             startAutomaticCallRecordingIfNeeded()
+            startAutoAnswerGreetingIfNeeded()
         } else {
             automaticRecordingAttemptedCallID = nil
+            pendingAutoAnswerGreeting = false
             activeCallModuleID = nil
         }
         scheduleCellularLinkRecoveryIfNeeded()
 
         if taggedSnapshot.phase == .incoming {
             if shouldNotify {
-                alertSounds.startIncomingRingtone()
-                if !CommunicationWindowController.shared.isPresentingCallUI {
-                    NotificationService.shared.postIncomingCall(
+                let displayName = taggedSnapshot.number.flatMap {
+                    SystemContactStore.shared.displayName(for: $0)
+                }
+                SMSWebhookService.shared.deliverIncomingCall(
+                    number: taggedSnapshot.number,
+                    displayName: displayName,
+                    moduleID: moduleID
+                )
+                if automaticallyAnswerIncomingCalls {
+                    pendingAutoAnswerGreeting = true
+                    answerCall()
+                    if !isChangingCall && !isRequestingMicrophoneAccess {
+                        pendingAutoAnswerGreeting = false
+                        presentIncomingCallAlert(
+                            number: taggedSnapshot.number,
+                            displayName: displayName
+                        )
+                    }
+                } else {
+                    presentIncomingCallAlert(
                         number: taggedSnapshot.number,
-                        displayName: taggedSnapshot.number.flatMap {
-                            SystemContactStore.shared.displayName(for: $0)
-                        },
-                        presentation: privacyPresentation
+                        displayName: displayName
                     )
                 }
             }
@@ -1037,17 +1053,23 @@ final class AppState: ObservableObject {
         alertSounds.stopIncomingRingtone()
         NotificationService.shared.clearIncomingCall()
         if let completedCall, completedCall.isMissed {
-            NotificationService.shared.postMissedCall(
-                completedCall,
-                displayName: SystemContactStore.shared.displayName(for: completedCall.number),
-                presentation: privacyPresentation
-            )
+            postMissedCallNotification(completedCall)
         }
 
         if !taggedSnapshot.hasCall,
            let pending = moduleCallSnapshots.first(where: { $0.value.hasCall }) {
             handleCallSnapshot(pending.value, moduleID: pending.key)
         }
+    }
+
+    private func postMissedCallNotification(_ record: CallHistoryRecord) {
+        let displayName = SystemContactStore.shared.displayName(for: record.number)
+        NotificationService.shared.postMissedCall(
+            record,
+            displayName: displayName,
+            presentation: privacyPresentation
+        )
+        SMSWebhookService.shared.deliverMissedCall(record, displayName: displayName)
     }
 
     func refreshEUICC(moduleID: CellularModuleID? = nil) {
@@ -2068,6 +2090,12 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setAutomaticallyAnswerIncomingCalls(_ enabled: Bool) {
+        guard automaticallyAnswerIncomingCalls != enabled else { return }
+        automaticallyAnswerIncomingCalls = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.automaticallyAnswerIncomingCallsKey)
+    }
+
     func setPresentationPrivacyEnabled(_ enabled: Bool) {
         guard isPresentationPrivacyEnabled != enabled else { return }
         isPresentationPrivacyEnabled = enabled
@@ -2153,12 +2181,15 @@ final class AppState: ObservableObject {
             return
         }
         guard !isChangingCall else { return }
-        isChangingCall = true
-        dismissTransientMessage()
-        service.dial(number) { [weak self] result in
-            guard let self else { return }
-            self.isChangingCall = false
-            self.show(result)
+        withMicrophoneAccess { [weak self] in
+            guard let self, !self.isChangingCall else { return }
+            self.isChangingCall = true
+            self.dismissTransientMessage()
+            service.dial(number) { [weak self] result in
+                guard let self else { return }
+                self.isChangingCall = false
+                self.show(result)
+            }
         }
     }
 
@@ -2173,11 +2204,35 @@ final class AppState: ObservableObject {
             return
         }
         guard !isChangingCall else { return }
-        isChangingCall = true
-        service.answerCall { [weak self] result in
-            guard let self else { return }
-            self.isChangingCall = false
-            self.show(result)
+        withMicrophoneAccess { [weak self] in
+            guard let self, !self.isChangingCall else { return }
+            self.isChangingCall = true
+            service.answerCall { [weak self] result in
+                guard let self else { return }
+                self.isChangingCall = false
+                self.show(result)
+                if case .failure = result,
+                   self.automaticallyAnswerIncomingCalls,
+                   self.call.phase == .incoming {
+                    self.presentIncomingCallAlert(
+                        number: self.call.number,
+                        displayName: self.call.number.flatMap {
+                            SystemContactStore.shared.displayName(for: $0)
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    private func presentIncomingCallAlert(number: String?, displayName: String?) {
+        alertSounds.startIncomingRingtone()
+        if !CommunicationWindowController.shared.isPresentingCallUI {
+            NotificationService.shared.postIncomingCall(
+                number: number,
+                displayName: displayName,
+                presentation: privacyPresentation
+            )
         }
     }
 
@@ -2227,6 +2282,33 @@ final class AppState: ObservableObject {
         automaticRecordingAttemptedCallID = callID
         guard callRecordings.phase == .idle else { return }
         startCallRecording()
+    }
+
+    private func startAutoAnswerGreetingIfNeeded() {
+        guard pendingAutoAnswerGreeting,
+              call.phase == .active,
+              call.audioActive else {
+            return
+        }
+        pendingAutoAnswerGreeting = false
+        let moduleID = activeCallModuleID ?? call.moduleID
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let pcm: Data
+            do {
+                pcm = try await AutoAnswerGreetingStore.shared.renderUplinkPCM()
+            } catch {
+                self.presentTransientMessage(
+                    L10n.tr("无法生成应答语音：%@", error.localizedDescription),
+                    isError: true
+                )
+                return
+            }
+            guard !pcm.isEmpty,
+                  self.call.phase == .active,
+                  self.call.audioActive else { return }
+            self.modemService(for: moduleID)?.playUplinkGreeting(pcm)
+        }
     }
 
     func stopCallRecording(completion: (() -> Void)? = nil) {
@@ -2528,6 +2610,39 @@ final class AppState: ObservableObject {
             }
         case let .failure(message):
             presentTransientMessage(message, isError: true)
+        }
+    }
+
+    private func withMicrophoneAccess(_ action: @escaping () -> Void) {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            action()
+        case .notDetermined:
+            guard !isRequestingMicrophoneAccess else { return }
+            isRequestingMicrophoneAccess = true
+            NSApp.activate(ignoringOtherApps: true)
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async {
+                    self.isRequestingMicrophoneAccess = false
+                    if granted {
+                        action()
+                    } else {
+                        self.presentMicrophonePermissionRequired()
+                    }
+                }
+            }
+        default:
+            presentMicrophonePermissionRequired()
+        }
+    }
+
+    private func presentMicrophonePermissionRequired() {
+        presentTransientMessage(
+            L10n.tr("需要麦克风权限才能通话。请到设置 → 隐私权限 → 麦克风授权后再试。"),
+            isError: true
+        )
+        if call.phase == .incoming {
+            CommunicationWindowController.shared.showCurrentCall()
         }
     }
 

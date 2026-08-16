@@ -21,6 +21,24 @@ struct PhoneWindowView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .top) {
+                if let message = appState.transientMessage {
+                    Label(
+                        message,
+                        systemImage: appState.transientIsError
+                            ? "exclamationmark.triangle.fill"
+                            : "checkmark.circle.fill"
+                    )
+                    .font(.callout)
+                    .foregroundStyle(appState.transientIsError ? Color.red : Color.secondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .adaptiveGlassSurface(cornerRadius: 14, treatment: .regular)
+                    .padding(.top, 48)
+                    .padding(.horizontal, 20)
+                    .allowsHitTesting(false)
+                }
+            }
         }
         .background(Color.clear)
         .ignoresSafeArea(.container, edges: .top)
@@ -644,7 +662,7 @@ private struct ActiveCallView: View {
                             systemImage: "phone.fill",
                             tint: .green,
                             prominent: true,
-                            isEnabled: canAnswer,
+                            isEnabled: !appState.isChangingCall,
                             diameter: compact ? 58 : 66
                         ) {
                             appState.answerCall()
@@ -652,9 +670,13 @@ private struct ActiveCallView: View {
                     }
                 }
 
-                Text(canAnswer ? L10n.tr("使用 Mac 接听") : L10n.tr("USB 语音通道尚未就绪"))
+                Text(answerHintText)
                     .font(.caption)
-                    .foregroundStyle(canAnswer ? Color.secondary : Color.orange)
+                    .foregroundStyle(
+                        appState.isChangingCall || appState.call.voiceOverUSBSupported
+                            ? Color.secondary
+                            : Color.orange
+                    )
             }
             .frame(maxWidth: 390)
 
@@ -810,9 +832,14 @@ private struct ActiveCallView: View {
             appState.call.audioActive
     }
 
-    private var canAnswer: Bool {
-        appState.call.voiceOverUSBSupported &&
-            !appState.isChangingCall
+    private var answerHintText: String {
+        if appState.isChangingCall {
+            return L10n.tr("正在接通…")
+        }
+        if appState.call.voiceOverUSBSupported {
+            return L10n.tr("使用 Mac 接听")
+        }
+        return L10n.tr("USB 语音通道尚未就绪")
     }
 
     private func toggleRecording() {
@@ -1283,13 +1310,12 @@ private struct RecentCallsView: View {
     }
 
     private func canDial(_ record: CallHistoryRecord) -> Bool {
-        appState.moduleCanDial(nil) &&
-            !appState.isChangingCall &&
+        !appState.isChangingCall &&
             CallATParser.normalizedDialNumber(record.number) != nil
     }
 
     private func call(_ record: CallHistoryRecord) {
-        guard canDial(record) else { return }
+        guard CallATParser.normalizedDialNumber(record.number) != nil else { return }
         model.dialNumber = record.number
         appState.dial(record.number)
     }
@@ -1562,13 +1588,12 @@ private struct RecentCallDetailView: View {
     }
 
     private func canDial(_ record: CallHistoryRecord) -> Bool {
-        appState.moduleCanDial(nil) &&
-            !appState.isChangingCall &&
+        !appState.isChangingCall &&
             CallATParser.normalizedDialNumber(record.number) != nil
     }
 
     private func call(_ record: CallHistoryRecord) {
-        guard canDial(record) else { return }
+        guard CallATParser.normalizedDialNumber(record.number) != nil else { return }
         model.dialNumber = record.number
         appState.dial(record.number)
     }
@@ -1624,8 +1649,7 @@ private struct RecentCallDetailAction: View {
         .buttonStyle(CallControlPressStyle())
         .adaptiveGlassSurface(
             cornerRadius: compact ? 14 : 16,
-            treatment: .clear,
-            isInteractive: isEnabled
+            treatment: .clear
         )
         .disabled(!isEnabled)
         .opacity(isEnabled ? 1 : 0.46)
@@ -2422,7 +2446,7 @@ private struct ContactEditorView: View {
                                     }
                                 )
                             )
-                            .toggleStyle(.adaptiveGlass)
+                            .toggleStyle(.adaptiveGlassLabeled)
                         }
                     }
                 }

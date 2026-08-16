@@ -269,7 +269,7 @@ private struct VoWiFiDetailView: View {
                     .foregroundStyle(VoWiFiStatusStyle.color(for: state))
                 Spacer()
                 Toggle(L10n.tr("启用"), isOn: runningBinding)
-                    .toggleStyle(.adaptiveGlass)
+                    .toggleStyle(.adaptiveGlassLabeled)
                     .controlSize(.small)
                     .disabled(!canToggle)
                     .accessibilityIdentifier("VoWiFiRuntimeToggle")

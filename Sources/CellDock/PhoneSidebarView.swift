@@ -191,13 +191,12 @@ struct PhoneSidebarView: View {
     }
 
     private func canDial(_ record: CallHistoryRecord) -> Bool {
-        appState.moduleCanDial(nil) &&
-            !appState.isChangingCall &&
+        !appState.isChangingCall &&
             CallATParser.normalizedDialNumber(record.number) != nil
     }
 
     private func call(_ record: CallHistoryRecord) {
-        guard canDial(record) else { return }
+        guard CallATParser.normalizedDialNumber(record.number) != nil else { return }
         model.dialNumber = record.number
         appState.dial(record.number)
     }

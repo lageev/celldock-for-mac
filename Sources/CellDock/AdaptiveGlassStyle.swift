@@ -83,6 +83,7 @@ struct AdaptiveGlassContainer<Content: View>: View {
 
 struct AdaptiveGlassToggleStyle: ToggleStyle {
     @Environment(\.isEnabled) private var isEnabled
+    var showsLabel = false
 
     func makeBody(configuration: Configuration) -> some View {
         Button {
@@ -91,9 +92,10 @@ struct AdaptiveGlassToggleStyle: ToggleStyle {
             }
         } label: {
             HStack(spacing: 10) {
-                configuration.label
-
-                Spacer(minLength: 0)
+                if showsLabel {
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
 
                 AdaptiveGlassToggleTrack(isOn: configuration.isOn)
             }
@@ -168,6 +170,10 @@ private struct AdaptiveGlassToggleTrack: View {
 extension ToggleStyle where Self == AdaptiveGlassToggleStyle {
     static var adaptiveGlass: AdaptiveGlassToggleStyle {
         AdaptiveGlassToggleStyle()
+    }
+
+    static var adaptiveGlassLabeled: AdaptiveGlassToggleStyle {
+        AdaptiveGlassToggleStyle(showsLabel: true)
     }
 }
 
